@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+*.log
+
+# Sample test textures — licensing unverified, kept out of the public repo
+Test-Images/
+
+# Local/scratch
+*.tmp
+.DS_Store
+Thumbs.db

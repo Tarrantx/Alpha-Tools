@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "description": "Upscale rescue for 1-bit alpha-test textures (foliage, fences, grilles, masks, sprite cutouts). Forces final alpha to pure 0 or 255 — anything with alpha > 32 becomes opaque, anything below becomes transparent. The low threshold tolerates upscaler softening that drops originally-opaque pixels down to 100-127.",
+  "params": {
+    "vtracer_enabled": false,
+    "alpha_source": "fix",
+    "fix_level_low": 0,
+    "fix_level_high": 100,
+    "snap_enabled": false,
+    "blur_radius": 0.0,
+    "despeckle": 1,
+    "clamp_mode": "binary",
+    "binary_threshold": 32,
+    "edge_dilation": 0,
+    "edge_dilation_threshold": 16,
+    "premultiply": false
+  }
+}

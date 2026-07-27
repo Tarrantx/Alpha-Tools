@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "description": "Original Alphatools method 1 — level existing alpha 30-70%, preserving both gray and white plateaus. Mild cleanup of soft / fuzzy alpha.",
+  "params": {
+    "vtracer_enabled": false,
+    "alpha_source": "fix",
+    "fix_level_low": 30,
+    "fix_level_high": 70,
+    "snap_enabled": false,
+    "blur_radius": 0.0,
+    "despeckle": 0,
+    "binary_output": false,
+    "edge_dilation": 0,
+    "premultiply": false
+  }
+}

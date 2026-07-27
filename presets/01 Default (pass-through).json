@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "description": "Baseline pass-through: keeps the existing alpha and RGB untouched. Useful as a starting point for tuning in the Tune tab.",
+  "params": {
+    "vtracer_enabled": false,
+    "alpha_source": "fix",
+    "fix_level_low": 0,
+    "fix_level_high": 100,
+    "snap_enabled": false,
+    "blur_radius": 0.0,
+    "despeckle": 0,
+    "binary_output": false,
+    "edge_dilation": 0,
+    "premultiply": false
+  }
+}

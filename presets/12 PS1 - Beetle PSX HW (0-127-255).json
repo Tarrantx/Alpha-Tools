@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "description": "PS1 semi-transparent textures dumped from Beetle PSX HW (hash-named, no mode tag). Region-aware tri-state snap to exactly 0 / 127 / 255: Beetle uses 127 (true 50%) for semi-transparent pixels. Flat semi surfaces keep 127; upscaled cutout edges go binary. Safe for binary Beetle textures too — with no flat semi surfaces the result comes out clean 0 / 255. Preserves existing alpha, no blur. Touches the alpha channel only — enable Edge dilation manually if you want RGB bled into the cut-outs to suppress halos.",
+  "params": {
+    "vtracer_enabled": false,
+    "alpha_source": "fix",
+    "fix_level_low": 0,
+    "fix_level_high": 100,
+    "snap_enabled": false,
+    "blur_radius": 0.0,
+    "despeckle": 0,
+    "clamp_mode": "ps1",
+    "binary_threshold": 128,
+    "ps1_semi_value": 127,
+    "ps1_semi_tolerance": 40,
+    "ps1_region_min": 2,
+    "edge_dilation": 0,
+    "edge_dilation_threshold": 16,
+    "premultiply": false
+  }
+}

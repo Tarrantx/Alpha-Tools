@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "description": "Maximum upscale cleanup: vtracer-trace the RGB to remove upscaler noise, then snap alpha back to 0 / 128 / 255. Pre-quantize is disabled — vtracer's own color_precision handles colour reduction, preserving rare-but-saturated details. Uses pixel curve fitting (exact pixel boundaries) and stacked hierarchy. Best for cel-shaded / character-art source textures.",
+  "params": {
+    "vtracer_enabled": true,
+    "vtracer_pre_quantize": 0,
+    "vtracer_mode": "pixel",
+    "vtracer_hierarchical": "stacked",
+    "vtracer_color_precision": 6,
+    "vtracer_filter_speckle": 4,
+    "vtracer_gradient_step": 16,
+    "vtracer_corner_threshold": 60,
+    "vtracer_segment_length": 4.0,
+    "vtracer_splice_threshold": 45,
+    "alpha_source": "fix",
+    "fix_level_low": 0,
+    "fix_level_high": 100,
+    "snap_enabled": true,
+    "snap_levels": 3,
+    "snap_low_threshold": 25,
+    "snap_high_threshold": 230,
+    "snap_mid_tolerance": 40,
+    "blur_radius": 0.0,
+    "despeckle": 1,
+    "binary_output": false,
+    "edge_dilation": 0,
+    "edge_dilation_threshold": 16,
+    "premultiply": false
+  }
+}

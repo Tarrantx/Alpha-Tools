@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "description": "Upscale rescue: snaps the upscaled alpha back to its original 0 / 128 / 255 plateaus while keeping edge gradients, plus 2 px RGB dilation. The go-to preset for upscaled game textures with mixed transparent / semi-transparent / opaque regions.",
+  "params": {
+    "vtracer_enabled": false,
+    "alpha_source": "fix",
+    "fix_level_low": 0,
+    "fix_level_high": 100,
+    "snap_enabled": true,
+    "snap_levels": 3,
+    "snap_low_threshold": 25,
+    "snap_high_threshold": 230,
+    "snap_mid_tolerance": 40,
+    "blur_radius": 0.0,
+    "despeckle": 1,
+    "binary_output": false,
+    "edge_dilation": 0,
+    "edge_dilation_threshold": 16,
+    "premultiply": false
+  }
+}

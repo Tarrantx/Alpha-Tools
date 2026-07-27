@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "description": "PS1 semi-transparent textures dumped from DuckStation (filenames tagged STP4 / STP8). Region-aware tri-state snap to exactly 0 / 143 / 255: flat semi-transparent surfaces keep DuckStation's semi value (143), while upscaled cutout edges are forced binary so they don't become blended halos on re-injection (DuckStation treats ANY alpha < 255 as 'blend this texel'). Preserves the existing alpha, no blur. Touches the alpha channel only — enable Edge dilation manually if you want RGB bled into the cut-outs to suppress halos. For non-STP (P4/P8) DuckStation textures use the binary cutout preset instead.",
+  "params": {
+    "vtracer_enabled": false,
+    "alpha_source": "fix",
+    "fix_level_low": 0,
+    "fix_level_high": 100,
+    "snap_enabled": false,
+    "blur_radius": 0.0,
+    "despeckle": 0,
+    "clamp_mode": "ps1",
+    "binary_threshold": 128,
+    "ps1_semi_value": 143,
+    "ps1_semi_tolerance": 40,
+    "ps1_region_min": 2,
+    "edge_dilation": 0,
+    "edge_dilation_threshold": 16,
+    "premultiply": false
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "description": "Synthesise a gray (128) alpha from RGB luminance, anchored to the original alpha. Interior pixels are protected unconditionally; the fringe zone (between the shrunk seed and the expand boundary) is evaluated by luminance — only pixels above the threshold contribute to the new alpha. N-level snap cleans up any residual values after the luminance pass.",
+  "params": {
+    "vtracer_enabled": false,
+    "alpha_source": "create",
+    "create_target": "gray",
+    "create_lum_mode": "perceptual",
+    "create_seed_shrink": 2,
+    "create_expand_limit": 4,
+    "create_lum_threshold": 10.0,
+    "snap_enabled": true,
+    "snap_levels": 3,
+    "snap_low_threshold": 25,
+    "snap_high_threshold": 230,
+    "snap_mid_tolerance": 40,
+    "blur_radius": 0.0,
+    "despeckle": 0,
+    "edge_dilation": 0,
+    "premultiply": false
+  }
+}

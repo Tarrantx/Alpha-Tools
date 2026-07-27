@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "description": "Gentle all-round tidy: mild 40-60 alpha level, one despeckle pass, 2 px RGB dilation. The 'I just want it a bit cleaner' choice without committing to plateau snapping.",
+  "params": {
+    "vtracer_enabled": false,
+    "alpha_source": "fix",
+    "fix_level_low": 40,
+    "fix_level_high": 60,
+    "snap_enabled": false,
+    "blur_radius": 0.0,
+    "despeckle": 1,
+    "binary_output": false,
+    "edge_dilation": 0,
+    "edge_dilation_threshold": 16,
+    "premultiply": false
+  }
+}
