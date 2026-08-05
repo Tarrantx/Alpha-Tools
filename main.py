@@ -1238,22 +1238,45 @@ class ZoomPanPreview(ctk.CTkFrame):
         fit = self._fit_factor()
         eff = fit * self._zoom
         iw, ih = self._base_img.size
-        dw = max(1, int(iw * eff))
-        dh = max(1, int(ih * eff))
+        dw = iw * eff
+        dh = ih * eff
+
+        cw = self.canvas.winfo_width() or 1
+        ch = self.canvas.winfo_height() or 1
+        cx = cw // 2 + self._offset_x
+        cy = ch // 2 + self._offset_y
+        left = cx - dw / 2.0      # canvas x of the image's left edge
+        top = cy - dh / 2.0
+
+        # Viewport rendering: rasterise ONLY the source region currently visible
+        # in the canvas, not the whole image scaled to the (possibly enormous)
+        # zoomed size. Cost is O(viewport) at any zoom instead of O(image·zoom²),
+        # which is what made high-zoom pan/zoom crawl. (A 1–2px overscan avoids
+        # edge gaps.) The coordinate transform is unchanged, so the cursor
+        # readout and grid stay pixel-accurate.
+        src_x0 = max(0, int((0 - left) / eff) - 1)
+        src_y0 = max(0, int((0 - top) / eff) - 1)
+        src_x1 = min(iw, int((cw - left) / eff) + 2)
+        src_y1 = min(ih, int((ch - top) / eff) + 2)
+        if src_x1 <= src_x0 or src_y1 <= src_y0:
+            return  # image is entirely off-screen (panned away)
+
+        crop = self._base_img.crop((src_x0, src_y0, src_x1, src_y1))
+        disp_w = max(1, int(round((src_x1 - src_x0) * eff)))
+        disp_h = max(1, int(round((src_y1 - src_y0) * eff)))
 
         # Pillow resample: NEAREST when zoomed past 1:1 (preserve pixels),
         # LANCZOS otherwise (good quality downscale / mild upscale).
         resample = Image.Resampling.NEAREST if eff >= 1.5 else Image.Resampling.LANCZOS
-        scaled = self._base_img.resize((dw, dh), resample=resample)
+        scaled = crop.resize((disp_w, disp_h), resample=resample)
         if self._grid is not None:
-            scaled = self._apply_grid(scaled, eff)
+            scaled = self._apply_grid(scaled, eff, src_x0, src_y0)
         self._photo = ImageTk.PhotoImage(scaled)
 
-        cw = self.canvas.winfo_width()
-        ch = self.canvas.winfo_height()
-        cx = cw // 2 + self._offset_x
-        cy = ch // 2 + self._offset_y
-        self._image_id = self.canvas.create_image(cx, cy, image=self._photo)
+        # Place the crop where its source top-left maps to on the canvas.
+        self._image_id = self.canvas.create_image(
+            left + src_x0 * eff, top + src_y0 * eff,
+            image=self._photo, anchor="nw")
 
     _GRID_COLORS = {
         "red":   (255,  64,  64),
@@ -1274,39 +1297,43 @@ class ZoomPanPreview(ctk.CTkFrame):
                 yield lo, hi
             p += step
 
-    def _apply_grid(self, scaled: Image.Image, eff: float) -> Image.Image:
-        """Composite a grid of vertical + horizontal lines onto the scaled
-        image. Grid step is in SOURCE-image pixels (so a 16×16 grid is on
-        source pixel boundaries) and stays aligned to the source through
-        zoom + pan. Line thickness is in SCREEN pixels so lines remain
-        visually consistent across zoom levels.
-
-        The overlay image is cached keyed on (size, eff, line_width, colour,
-        semi) so drag-pan events — which don't change any of those — reuse
-        the cached overlay instead of rebuilding it per frame.
-        """
+    def _apply_grid(self, scaled: Image.Image, eff: float,
+                    src_x0: int, src_y0: int) -> Image.Image:
+        """Composite grid lines onto the visible crop `scaled`. Grid step is in
+        SOURCE-image pixels (a 16×16 grid lands on source pixel boundaries) and
+        stays aligned to the source through zoom + pan; line thickness is in
+        SCREEN pixels. Lines are placed at source multiples of `size`, offset by
+        the crop's source origin (src_x0, src_y0). The overlay is viewport-sized
+        so it's cheap to rebuild each frame."""
         cfg = self._grid
-        step_screen = cfg["size"] * eff
+        size = int(cfg["size"])
+        step_screen = size * eff
         if step_screen < 2:
             # Grid is denser than the displayed image — would look like noise.
             return scaled
         dw, dh = scaled.size
+        overlay = Image.new("RGBA", (dw, dh), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        rgb = self._GRID_COLORS[cfg["color"]]
+        fill = rgb + (110 if cfg["semi"] else 230,)
+        half = cfg["line_width"] / 2.0
 
-        key = (dw, dh, cfg["size"], cfg["line_width"], cfg["color"],
-               cfg["semi"], eff)
-        if self._grid_overlay_cache and self._grid_overlay_cache[0] == key:
-            overlay = self._grid_overlay_cache[1]
-        else:
-            overlay = Image.new("RGBA", (dw, dh), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(overlay)
-            rgb = self._GRID_COLORS[cfg["color"]]
-            fill = rgb + (110 if cfg["semi"] else 230,)
-            half = cfg["line_width"] / 2.0
-            for lo, hi in self._stripes(dw, step_screen, half):
+        # First source grid line (multiple of `size`) at/after the crop origin;
+        # its crop-local screen position is (line_src - src_x0) * eff.
+        kx = -(-src_x0 // size)                 # ceil(src_x0 / size)
+        x = (kx * size - src_x0) * eff
+        while x <= dw + 0.5:
+            lo = int(round(x - half)); hi = int(round(x + half)) - 1
+            if hi >= lo:
                 draw.rectangle([lo, 0, hi, dh - 1], fill=fill)
-            for lo, hi in self._stripes(dh, step_screen, half):
+            x += step_screen
+        ky = -(-src_y0 // size)
+        y = (ky * size - src_y0) * eff
+        while y <= dh + 0.5:
+            lo = int(round(y - half)); hi = int(round(y + half)) - 1
+            if hi >= lo:
                 draw.rectangle([0, lo, dw - 1, hi], fill=fill)
-            self._grid_overlay_cache = (key, overlay)
+            y += step_screen
 
         if scaled.mode != "RGBA":
             scaled = scaled.convert("RGBA")
