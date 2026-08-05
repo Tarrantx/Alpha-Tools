@@ -1736,7 +1736,8 @@ def level_colors_rgb(rgb: Image.Image, level_r: float, level_g: float,
 
 # --- Stage 6b: Pixelate ----------------------------------------------------
 
-def pixelate(rgba: Image.Image, factor: float) -> Image.Image:
+def pixelate(rgba: Image.Image, factor: float,
+             block: "Optional[tuple]" = None) -> Image.Image:
     """Re-pixelate an upscaled texture: downsample by `factor` then upsample
     back to original size, both with nearest-neighbour. factor<=1 is a no-op.
 
@@ -1745,6 +1746,12 @@ def pixelate(rgba: Image.Image, factor: float) -> Image.Image:
     floor/ceil widths rather than a uniform NxN grid — a gentler pixelation
     than the next whole factor.
 
+    `block` = (block_w, block_h) overrides the block SIZE (the resize ratio)
+    instead of deriving it from this image's own dimensions. The ROI full-res
+    preview passes the WHOLE image's block size so a crop pixelates on the same
+    grid as the full image (otherwise the crop's own width gives a slightly
+    different ratio and the blocks drift out of alignment).
+
     Operates on the composed RGBA so RGB and alpha are pixelated together
     — otherwise you get pixelated colour with smooth alpha edges (or vice
     versa), which looks wrong.
@@ -1752,8 +1759,12 @@ def pixelate(rgba: Image.Image, factor: float) -> Image.Image:
     if factor <= 1:
         return rgba
     w, h = rgba.size
-    sw = max(1, int(round(w / factor)))
-    sh = max(1, int(round(h / factor)))
+    if block is not None:
+        sw = max(1, int(round(w / block[0])))
+        sh = max(1, int(round(h / block[1])))
+    else:
+        sw = max(1, int(round(w / factor)))
+        sh = max(1, int(round(h / factor)))
     small = rgba.resize((sw, sh), resample=Image.Resampling.NEAREST)
     return small.resize((w, h), resample=Image.Resampling.NEAREST)
 
@@ -2193,7 +2204,8 @@ def _stage_compose(rgb: Image.Image, work_alpha: Image.Image) -> Image.Image:
 def _stage_pixelate(out: Image.Image, params: dict) -> Image.Image:
     # Last spatial step — affects RGB + alpha together so edges stay aligned.
     if float(params["pixelate_factor"]) > 1:
-        return pixelate(out, float(params["pixelate_factor"]))
+        block = (params.get("_roi_ctx") or {}).get("pixelate_block")
+        return pixelate(out, float(params["pixelate_factor"]), block=block)
     return out
 
 
@@ -2298,6 +2310,7 @@ def _quantize_at_pixelart_res(out: Image.Image, factor: float, quant_fn):
 def _stage_quantize(out: Image.Image, params: dict) -> Image.Image:
     dither = float(params.get("quantize_dither", 0.0))
     factor = float(params.get("pixelate_factor", 1.0))
+    ctx = params.get("_roi_ctx") or {}
 
     # Custom-palette match takes precedence over the colour-depth count.
     if params.get("quantize_use_palette") and params.get("quantize_palette_path"):
@@ -2309,7 +2322,14 @@ def _stage_quantize(out: Image.Image, params: dict) -> Image.Image:
         n = _QUANTIZE_COLORS.get(str(params.get("quantize_mode", "Full colour")), 0)
         if n <= 0:
             return out                      # full colour, nothing to reduce
-        quant_fn = lambda im: quantize_rgba(im, n, dither)          # noqa: E731
+        override = ctx.get("quantize_palette")
+        if override is not None:
+            # ROI crop: reuse the whole-image (low-res) result's palette so the
+            # crop's colours match the rest of the image instead of being
+            # re-derived from just the crop.
+            quant_fn = lambda im: quantize_to_palette(im, override, dither)  # noqa: E731
+        else:
+            quant_fn = lambda im: quantize_rgba(im, n, dither)     # noqa: E731
 
     # Dithering only reads as pixel art when applied at the block resolution.
     if dither > 0 and factor > 1:
@@ -2319,7 +2339,8 @@ def _stage_quantize(out: Image.Image, params: dict) -> Image.Image:
 
 def process_pil(img: Image.Image,
                 params: dict,
-                work_dir: Optional[Path] = None) -> Image.Image:
+                work_dir: Optional[Path] = None,
+                ctx: Optional[dict] = None) -> Image.Image:
     """Run the full alpha cleanup pipeline on an in-memory RGBA image and
     return the result as a PIL image.
 
@@ -2327,8 +2348,16 @@ def process_pil(img: Image.Image,
     inherently needs a file. The live preview calls this directly so that
     every parameter change avoids a full PNG encode + decode round-trip; the
     path-based `process_image` is a thin wrapper around it.
+
+    `ctx` is an optional dict of precomputed global context used by the ROI
+    full-res preview (see process_crop / compute_roi_ctx) so that a crop matches
+    the whole-image result for stages that otherwise depend on global stats
+    (currently the quantise palette). None everywhere else — behaviour is then
+    identical to before.
     """
     params = {**DEFAULT_PARAMS, **params}
+    if ctx:
+        params["_roi_ctx"] = ctx
 
     with _maybe_tempdir(work_dir) as tmp:
         rgb_base, original_alpha = _stage_load(img, params, tmp)
@@ -2398,6 +2427,87 @@ def process_image(input_path,
                 out = out.convert("RGBA")
             out.save(output_path)
         return output_path
+
+
+# --- ROI (region-of-interest) full-res preview ----------------------------
+#
+# The live preview runs on a downscaled copy for speed, so any pixel-scale stage
+# (reach, blur, erode/dilate, pixelate, soften, ...) looks proportionally
+# different from the full-res save. When the user zooms in, we instead process
+# only the VISIBLE full-res crop and show that — pixel-accurate where they're
+# looking, and cheap because it's just the on-screen region. A couple of global
+# stats (currently the quantise palette) are injected from the whole-image
+# low-res result so the crop's colours match the rest of the image.
+
+def compute_roi_ctx(last_after: Optional[Image.Image], params: dict) -> dict:
+    """Global context for a ROI crop, derived from the already-computed low-res
+    result so the crop matches the whole image. Currently: the quantise palette
+    (colour-count mode), so crops don't each derive their own palette."""
+    params = {**DEFAULT_PARAMS, **params}
+    ctx: dict = {}
+    if last_after is None:
+        return ctx
+    if not params.get("quantize_use_palette"):
+        n = _QUANTIZE_COLORS.get(str(params.get("quantize_mode", "Full colour")), 0)
+        if n > 0:
+            try:
+                ctx["quantize_palette"] = last_after.convert("RGB").quantize(
+                    colors=max(2, min(256, n)))
+            except Exception:
+                pass
+    return ctx
+
+
+def _roi_margin_align(params: dict) -> "tuple[int, int]":
+    """Overscan (px) needed so boundary-sensitive stages match at the crop edge,
+    and the grid alignment for pixelate so its blocks line up with the whole
+    image. Margin is trimmed off the result; alignment snaps the crop origin."""
+    m = 8
+    if params.get("incong_enabled"):
+        m = max(m, int(params.get("incong_reach", 0)) + 2)
+    m = max(m, int(round(float(params.get("blur_radius", 0.0)) * 3)))
+    m = max(m, int(params.get("despeckle", 0)))
+    m = max(m, int(params.get("alpha_erosion", 0)) + int(params.get("alpha_dilation", 0)))
+    m = max(m, int(params.get("edge_dilation", 0)))
+    m = max(m, int(params.get("soften_edges", 0)))
+    if str(params.get("clamp_mode", "none")) == "ps1":
+        m = max(m, int(params.get("ps1_region_min", 0)) * 2)
+    if _build_fx_chain(params):
+        m = max(m, 32)              # generous pad for fx pixel radii
+    m = min(m, 128)                 # cap so the crop stays viewport-cheap
+    factor = float(params.get("pixelate_factor", 1.0))
+    align = max(1, int(round(factor))) if factor > 1 else 1
+    return m, align
+
+
+def process_crop(full_img: Image.Image, params: dict, rect,
+                 ctx: Optional[dict] = None):
+    """Process just the full-res region `rect` (x0,y0,x1,y1) of `full_img`,
+    with an overscan margin so edge stages match, then trim back to `rect`.
+    Returns (rgba_crop, rect) or None if the rect is empty. Local pixel-scale
+    stages are exact; `ctx` (compute_roi_ctx) keeps the quantise palette
+    consistent with the whole image."""
+    params = {**DEFAULT_PARAMS, **params}
+    W, H = full_img.size
+    x0, y0, x1, y1 = (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3]))
+    x0 = max(0, x0); y0 = max(0, y0); x1 = min(W, x1); y1 = min(H, y1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    margin, align = _roi_margin_align(params)
+    ex0 = max(0, x0 - margin); ey0 = max(0, y0 - margin)
+    ex1 = min(W, x1 + margin); ey1 = min(H, y1 + margin)
+    if align > 1:
+        ex0 -= ex0 % align       # snap origin to the pixelate grid
+        ey0 -= ey0 % align
+
+    crop = full_img.crop((ex0, ey0, ex1, ey1))
+    res = process_pil(crop, params, ctx=ctx)
+    if res.mode != "RGBA":
+        res = res.convert("RGBA")
+    tx0, ty0 = x0 - ex0, y0 - ey0
+    trimmed = res.crop((tx0, ty0, tx0 + (x1 - x0), ty0 + (y1 - y0)))
+    return trimmed, (x0, y0, x1, y1)
 
 
 def process_one_file(task: dict) -> dict:

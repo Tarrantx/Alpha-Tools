@@ -1113,6 +1113,16 @@ class ZoomPanPreview(ctk.CTkFrame):
         self._grid: dict | None = None
         self._grid_overlay_cache: tuple | None = None  # (key, RGBA image)
 
+        # ROI full-res detail overlay: a full-resolution image covering a rect
+        # (in BASE-image coords) drawn on top of the low-res crop where the user
+        # is zoomed in. Provided by the owner via set_detail() after the view
+        # settles. on_view_settle fires ~250 ms after zoom/pan stops.
+        self._detail: tuple | None = None          # (base_rect, full_res_image)
+        self._photo_detail: ImageTk.PhotoImage | None = None
+        self.on_view_settle = None
+        self._settle_id = None
+        self._SETTLE_MS = 250
+
         bg = "#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#dbdbdb"
         self.canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=bg)
         self.canvas.pack(fill="both", expand=True)
@@ -1134,8 +1144,31 @@ class ZoomPanPreview(ctk.CTkFrame):
             self._zoom = 1.0
             self._offset_x = 0
             self._offset_y = 0
+        # The base image changed (new source or new params), so any detail
+        # overlay is stale — drop it (the owner recomputes via _redraw_previews).
+        self._detail = None
+        self._photo_detail = None
         self.canvas.configure(cursor="fleur" if pil_img is not None else "")
         self._render()
+
+    def set_detail(self, detail_img: Image.Image | None, base_rect):
+        """Overlay a full-resolution `detail_img` covering `base_rect`
+        (bx0,by0,bx1,by1 in base-image coords) on top of the low-res crop."""
+        self._detail = None if detail_img is None else (tuple(base_rect), detail_img)
+        self._render()
+
+    def _schedule_settle(self):
+        if self._settle_id is not None:
+            try:
+                self.after_cancel(self._settle_id)
+            except Exception:
+                pass
+        self._settle_id = self.after(self._SETTLE_MS, self._fire_settle)
+
+    def _fire_settle(self):
+        self._settle_id = None
+        if self.on_view_settle is not None:
+            self.on_view_settle()
 
     def set_placeholder(self, text: str):
         self._placeholder_text = text
@@ -1210,6 +1243,31 @@ class ZoomPanPreview(ctk.CTkFrame):
             return (min(iw - 1, int(sx)), min(ih - 1, int(sy)))
         return None
 
+    def visible_base_rect(self):
+        """The base-image region currently visible on the canvas, as
+        (x0, y0, x1, y1, eff), or None. `eff` is screen-px per base-px. Same
+        transform/overscan as _render, so the owner can request a matching
+        full-res crop."""
+        if self._base_img is None:
+            return None
+        eff = self._fit_factor() * self._zoom
+        if eff <= 0:
+            return None
+        iw, ih = self._base_img.size
+        dw = iw * eff; dh = ih * eff
+        cw = self.canvas.winfo_width() or 1
+        ch = self.canvas.winfo_height() or 1
+        cx = cw // 2 + self._offset_x
+        cy = ch // 2 + self._offset_y
+        left = cx - dw / 2.0; top = cy - dh / 2.0
+        x0 = max(0, int((0 - left) / eff) - 1)
+        y0 = max(0, int((0 - top) / eff) - 1)
+        x1 = min(iw, int((cw - left) / eff) + 2)
+        y1 = min(ih, int((ch - top) / eff) + 2)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return (x0, y0, x1, y1, eff)
+
     def _on_motion(self, event):
         if self.on_cursor_move is not None:
             self.on_cursor_move(self._canvas_to_image_px(event.x, event.y))
@@ -1277,6 +1335,34 @@ class ZoomPanPreview(ctk.CTkFrame):
         self._image_id = self.canvas.create_image(
             left + src_x0 * eff, top + src_y0 * eff,
             image=self._photo, anchor="nw")
+
+        # Full-res detail overlay: draw the accurate full-resolution result on
+        # top of the low-res crop wherever it's available and visible.
+        self._draw_detail(eff, left, top, src_x0, src_y0, src_x1, src_y1)
+
+    def _draw_detail(self, eff, left, top, vx0, vy0, vx1, vy1):
+        if self._detail is None:
+            self._photo_detail = None
+            return
+        (bx0, by0, bx1, by1), dimg = self._detail
+        # Intersect the detail's base rect with the visible region.
+        ix0 = max(vx0, bx0); iy0 = max(vy0, by0)
+        ix1 = min(vx1, bx1); iy1 = min(vy1, by1)
+        if ix1 <= ix0 or iy1 <= iy0:
+            self._photo_detail = None
+            return
+        # detail-image pixels per base pixel (detail is full-res for base_rect).
+        fs = dimg.width / max(1, (bx1 - bx0))
+        dcrop = dimg.crop((int((ix0 - bx0) * fs), int((iy0 - by0) * fs),
+                           int((ix1 - bx0) * fs), int((iy1 - by0) * fs)))
+        ddw = max(1, int(round((ix1 - ix0) * eff)))
+        ddh = max(1, int(round((iy1 - iy0) * eff)))
+        # screen px per detail px; NEAREST once we're upscaling the full-res.
+        det_scale = eff / fs
+        resample = Image.Resampling.NEAREST if det_scale >= 1.5 else Image.Resampling.LANCZOS
+        self._photo_detail = ImageTk.PhotoImage(dcrop.resize((ddw, ddh), resample))
+        self.canvas.create_image(left + ix0 * eff, top + iy0 * eff,
+                                 image=self._photo_detail, anchor="nw")
 
     _GRID_COLORS = {
         "red":   (255,  64,  64),
@@ -1355,6 +1441,7 @@ class ZoomPanPreview(ctk.CTkFrame):
         self._offset_y = self._drag_start_oy + (event.y - self._drag_start_y)
         self._render()
         self._mirror_view()
+        self._schedule_settle()
         # <Motion> doesn't fire during a B1 drag, so keep the readout live.
         if self.on_cursor_move is not None:
             self.on_cursor_move(self._canvas_to_image_px(event.x, event.y))
@@ -1369,6 +1456,7 @@ class ZoomPanPreview(ctk.CTkFrame):
         self._zoom = max(0.1, min(40.0, self._zoom * step))
         self._render()
         self._mirror_view()
+        self._schedule_settle()
 
     def _mirror_view(self):
         if self._mirroring:
@@ -3416,6 +3504,17 @@ class TuneTab(ctk.CTkFrame):
         self._bg_solid = tk.BooleanVar(value=False)
         self._bg_color: str = "#808080"   # initial solid background colour
 
+        # ROI full-res detail: a coalescing background worker recomputes the
+        # visible crop at full resolution when the view settles.
+        self._detail_lock = threading.Lock()
+        self._detail_pending: dict | None = None
+        self._detail_busy = False
+        self._detail_token = 0        # bumps on every settle to drop stale jobs
+        # Trigger detail when zoomed past ~1:1 of the full-res source; skip when
+        # the visible full-res region is bigger than this (zoomed out, and the
+        # low-res preview is fine there anyway).
+        self._DETAIL_MAX_PX = 4_000_000
+
         self._build()
 
         self.worker = PreviewWorker(
@@ -3565,6 +3664,11 @@ class TuneTab(ctk.CTkFrame):
             lambda c: self._update_coord_readout(c, "before"))
         self.after_view.on_cursor_move = (
             lambda c: self._update_coord_readout(c, "after"))
+        # ROI full-res detail: recompute the on-screen crop at full resolution
+        # when the view settles after a zoom/pan (either pane fires; both are
+        # updated). Only the interacted pane schedules, so no double work.
+        self.before_view.on_view_settle = self._on_view_settle
+        self.after_view.on_view_settle = self._on_view_settle
 
         # Status line
         self.status_label = ctk.CTkLabel(left, text="", anchor="w",
@@ -3902,6 +4006,77 @@ class TuneTab(ctk.CTkFrame):
             )
         else:
             self.after_view.set_placeholder("Computing…")
+        # Refresh the full-res detail overlay for the new params / view mode.
+        self._on_view_settle()
+
+    # -- ROI full-res detail preview ----------------------------------------
+
+    def _on_view_settle(self):
+        """After the view settles (or the preview refreshes), recompute the
+        visible on-screen crop at FULL resolution so what's shown matches the
+        save exactly. Only fires when zoomed in on a downscaled preview; the
+        low-res preview is left as-is when zoomed out."""
+        src, ps = self.source_image, self.preview_source
+        if src is None or ps is None or self.last_after is None:
+            return
+        if max(src.size) <= PREVIEW_MAX_DIM:
+            return          # preview is already full-res — nothing to refine
+        vr = self.before_view.visible_base_rect()
+        if vr is None:
+            return
+        bx0, by0, bx1, by1, eff = vr
+        if eff <= 1.05:     # zoomed out — low-res preview is fine; drop detail
+            self.before_view.set_detail(None, (0, 0, 0, 0))
+            self.after_view.set_detail(None, (0, 0, 0, 0))
+            return
+        full_scale = src.width / ps.width
+        fx0 = int(bx0 * full_scale); fy0 = int(by0 * full_scale)
+        fx1 = min(src.width, int(bx1 * full_scale) + 1)
+        fy1 = min(src.height, int(by1 * full_scale) + 1)
+        if (fx1 - fx0) * (fy1 - fy0) > self._DETAIL_MAX_PX:
+            return          # visible region too large — keep the fast preview
+        self._detail_token += 1
+        job = {"token": self._detail_token, "rect": (fx0, fy0, fx1, fy1),
+               "base_rect": (bx0, by0, bx1, by1), "params": dict(self.params),
+               "source": src, "last_after": self.last_after}
+        with self._detail_lock:
+            self._detail_pending = job
+            if not self._detail_busy:
+                self._detail_busy = True
+                threading.Thread(target=self._run_detail, daemon=True).start()
+
+    def _run_detail(self):
+        while True:
+            with self._detail_lock:
+                if self._detail_pending is None:
+                    self._detail_busy = False
+                    return
+                job = self._detail_pending
+                self._detail_pending = None
+            try:
+                ctx = pipeline.compute_roi_ctx(job["last_after"], job["params"])
+                out = pipeline.process_crop(
+                    job["source"], job["params"], job["rect"], ctx=ctx)
+            except Exception:
+                out = None
+            if out is None:
+                continue
+            after_crop, _ = out
+            before_crop = job["source"].crop(job["rect"])
+            self.after(0, lambda t=job["token"], b=before_crop,
+                       a=after_crop, r=job["base_rect"]:
+                       self._apply_detail(t, b, a, r))
+
+    def _apply_detail(self, token, before_crop, after_crop, base_rect):
+        if token != self._detail_token:
+            return          # a newer view superseded this result
+        try:
+            self.before_view.set_detail(
+                self._render_for_view(before_crop), base_rect)
+            self.after_view.set_detail(
+                self._render_for_view(after_crop), base_rect)
+        except Exception:
+            pass
 
 
 # --- Batch tab -------------------------------------------------------------
