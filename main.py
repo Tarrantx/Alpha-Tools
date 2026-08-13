@@ -326,6 +326,32 @@ HELP_TEXT = {
         "blending modes that expect premultiplied alpha. Leave off for "
         "standard / straight alpha.",
 
+    "perceptual_enabled":
+        "Perceptual tone/colour adjust in OKLCh — a hue-linear perceptual "
+        "space. Unlike RGB saturation/contrast, these knobs keep lightness, "
+        "colourfulness and hue independent (boosting vividness won't shift "
+        "brightness; contrast won't drift hue). Off = no conversion, no cost.",
+    "perceptual_lightness":
+        "Perceptual contrast on lightness (L) only, pivoted around mid-grey. "
+        "1.00 = no change, <1 flattens, >1 deepens — without dragging hue or "
+        "saturation along the way, unlike the RGB Contrast slider.",
+    "perceptual_chroma":
+        "Vividness (chroma) multiplier in OKLCh. 1.00 = no change, 0.00 = "
+        "grayscale, >1 = more colourful, at constant perceived lightness. "
+        "Cleaner than RGB saturation for punchy pixel art.",
+    "perceptual_hue":
+        "Rotate every hue by this many degrees around the OKLCh wheel "
+        "(-180..180). 0 = no change. Hue-linear, so colours shift evenly "
+        "without the blue->purple drift CIELAB would give.",
+    "perceptual_autolevel":
+        "Stretch the lightness (L) channel to the full perceptual range — a "
+        "perceptual auto-contrast that leaves hue and saturation untouched. "
+        "Runs independently of the OKLCh knobs above.",
+    "perceptual_autolevel_clip":
+        "Percent of pixels clipped off each end of the lightness histogram "
+        "before the auto-level stretch, so a few outlier pixels don't waste "
+        "the range. 0.5 = ignore the darkest/brightest 0.5%.",
+
     "saturation":
         "Colour saturation. 1.00 = no change, 0.00 = full grayscale, "
         "2.00 = doubled. Useful for restoring vibrance to upscaled textures "
@@ -2333,6 +2359,35 @@ class ParameterPanel(ctk.CTkScrollableFrame):
             ))
             self.rows[-1].pack(fill="x")
 
+        # Perceptual tone in OKLCh (hue-linear). Auto-level is independent of
+        # the enable toggle; both operate on the same OKLab round-trip.
+        SectionHeader(self, text="Perceptual (OKLCh)").pack(fill="x", pady=(12, 2))
+        self.rows.append(ToggleRow(
+            self, "Enable perceptual adjust", "perceptual_enabled",
+            self.params, help_text=H["perceptual_enabled"], on_change=self._fire,
+        ))
+        self.rows[-1].pack(fill="x")
+        for label, key, lo, hi, step, fmt in (
+                ("Lightness (contrast)", "perceptual_lightness", 0.5, 2.0, 0.05, "{:.2f}"),
+                ("Chroma (vividness)",   "perceptual_chroma",    0.0, 2.0, 0.05, "{:.2f}"),
+                ("Hue rotate (deg)",     "perceptual_hue",      -180, 180, 1,    "{:.0f}")):
+            self.rows.append(SliderRow(
+                self, label, key, self.params, lo, hi, step, fmt,
+                help_text=H[key], on_change=self._fire,
+            ))
+            self.rows[-1].pack(fill="x")
+        self.rows.append(ToggleRow(
+            self, "Auto-level lightness", "perceptual_autolevel",
+            self.params, help_text=H["perceptual_autolevel"], on_change=self._fire,
+        ))
+        self.rows[-1].pack(fill="x")
+        self.rows.append(SliderRow(
+            self, "Auto-level clip (%)", "perceptual_autolevel_clip",
+            self.params, 0.0, 5.0, 0.1, "{:.1f}",
+            help_text=H["perceptual_autolevel_clip"], on_change=self._fire,
+        ))
+        self.rows[-1].pack(fill="x")
+
     def _build_pixelate(self):
         H = HELP_TEXT
         SectionHeader(self, text="Pixelate").pack(fill="x", pady=(12, 2))
@@ -4054,7 +4109,8 @@ class TuneTab(ctk.CTkFrame):
                 job = self._detail_pending
                 self._detail_pending = None
             try:
-                ctx = pipeline.compute_roi_ctx(job["last_after"], job["params"])
+                ctx = pipeline.compute_roi_ctx(
+                    job["last_after"], job["params"], source=job["source"])
                 out = pipeline.process_crop(
                     job["source"], job["params"], job["rect"], ctx=ctx)
             except Exception:

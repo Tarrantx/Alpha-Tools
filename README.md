@@ -15,6 +15,7 @@ It has a live **Tune** tab (single image, side‑by‑side before/after with zoo
 
 **Colour / tone**
 - Saturation, contrast, brightness, and per‑channel **colour levels** (R/G/B).
+- **Perceptual tone (OKLCh)** — a hue‑linear perceptual space where lightness, colourfulness and hue stay independent: a *perceptual contrast* on lightness, a *chroma/vividness* boost that doesn't shift brightness, an even *hue rotation* (no CIELAB blue→purple drift), and an optional *auto‑level* that stretches lightness to full range. Independent of any reference image or palette.
 - Optional [vtracer](https://github.com/visioncortex/vtracer) raster→vector pre‑stage (needs Inkscape).
 
 **Finishing**

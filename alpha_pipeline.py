@@ -351,6 +351,15 @@ DEFAULT_PARAMS = {
     "level_r":                    0,
     "level_g":                    0,
     "level_b":                    0,
+    # Perceptual tone in OKLCh (hue-linear). The L/C/h knobs are gated by
+    # `perceptual_enabled`; auto-level runs on its own. Both share one OKLab
+    # round-trip and are a no-op (no conversion) when off.
+    "perceptual_enabled":         False,
+    "perceptual_lightness":       1.0,   # L contrast around mid; 1.0 = no change
+    "perceptual_chroma":          1.0,   # C vividness multiplier; 1.0 = no change
+    "perceptual_hue":             0.0,   # h rotation in degrees; 0 = no change
+    "perceptual_autolevel":       False, # stretch L to the full perceptual range
+    "perceptual_autolevel_clip":  0.5,   # percent clipped off each end
 
     # Stylise
     "pixelate_factor":            1.0,   # 1 = off; N = ~NxN blocks. Fractional (1.5) = milder
@@ -1734,6 +1743,103 @@ def level_colors_rgb(rgb: Image.Image, level_r: float, level_g: float,
     return Image.fromarray((out * 255.0 + 0.5).astype(np.uint8), mode="RGB")
 
 
+# --- Stage 6a2: Perceptual tone in OKLCh (Bjorn Ottosson's OKLab, 2020) -----
+# OKLab is a perceptual colour space like CIELAB but *hue-linear*: pushing
+# chroma or lightness does not drag hue around (CIELAB's blue drifts toward
+# purple). Its cylindrical form OKLCh gives intuitive Lightness / Chroma / Hue
+# axes. We work here, then output sRGB — the same pattern colour_match.py uses
+# for CIELAB, and reusing the identical piecewise sRGB transfer function.
+#
+# OKLab operates on LINEAR sRGB. L is ~0..1, a/b are small and signed.
+_OK_M1 = np.array([[0.4122214708, 0.5363325363, 0.0514459929],
+                   [0.2119034982, 0.6806995451, 0.1073969566],
+                   [0.0883024619, 0.2817188376, 0.6299787005]], dtype=np.float64)
+_OK_M2 = np.array([[0.2104542553,  0.7936177850, -0.0040720468],
+                   [1.9779984951, -2.4285922050,  0.4505937099],
+                   [0.0259040371,  0.7827717662, -0.8086757660]], dtype=np.float64)
+_OK_M1_INV = np.linalg.inv(_OK_M1)
+_OK_M2_INV = np.linalg.inv(_OK_M2)
+
+
+def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
+    """sRGB (0..1) -> linear, piecewise (matches colour_match._srgb_to_lab)."""
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
+    """linear -> sRGB (0..1), with a negative guard on the fractional power."""
+    return np.where(c <= 0.0031308, 12.92 * c,
+                    1.055 * np.maximum(c, 0.0) ** (1.0 / 2.4) - 0.055)
+
+
+def srgb_to_oklab(rgb_uint8: np.ndarray) -> np.ndarray:
+    """HxWx3 uint8 sRGB -> HxWx3 float64 OKLab (L, a, b)."""
+    lin = _srgb_to_linear(rgb_uint8.astype(np.float64) / 255.0)
+    lms_ = np.cbrt(lin @ _OK_M1.T)          # cbrt is sign-safe; lin >= 0 anyway
+    return lms_ @ _OK_M2.T
+
+
+def oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
+    """HxWx3 float OKLab -> HxWx3 float sRGB (0..255, unclamped)."""
+    lms = (lab @ _OK_M2_INV.T) ** 3         # sign-preserving on negatives
+    lin = lms @ _OK_M1_INV.T
+    return _linear_to_srgb(lin) * 255.0
+
+
+def oklab_autolevel_lohi(rgb_uint8: np.ndarray, clip_pct: float) -> "tuple[float, float]":
+    """Low/high OKLab-L percentile bounds for an auto-level stretch. `clip_pct`
+    is the percent clipped off EACH end (e.g. 0.5 -> 0.5th and 99.5th pct)."""
+    L = srgb_to_oklab(rgb_uint8)[..., 0]
+    clip = max(0.0, min(20.0, float(clip_pct))) / 100.0
+    return float(np.quantile(L, clip)), float(np.quantile(L, 1.0 - clip))
+
+
+def perceptual_oklch(rgb: Image.Image, params: dict,
+                     lohi: "Optional[tuple]" = None) -> Image.Image:
+    """Perceptual tone/colour adjust in OKLCh (RGB only; alpha handled
+    elsewhere). Gated by `perceptual_enabled` (the L/C/h knobs) and/or
+    `perceptual_autolevel` (stretch L to full range). One OKLab round-trip
+    serves both; a pure identity — with NO conversion — when both are off.
+
+    `lohi` overrides the auto-level bounds (the ROI preview injects the whole
+    image's bounds so a zoomed crop stretches identically to the full save)."""
+    do_lch = bool(params.get("perceptual_enabled", False))
+    do_auto = bool(params.get("perceptual_autolevel", False))
+    if not (do_lch or do_auto):
+        return rgb
+
+    arr = np.asarray(rgb.convert("RGB"), dtype=np.uint8)
+    lab = srgb_to_oklab(arr)
+    L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
+
+    # Auto-levels: percentile-stretch L to the full perceptual range [0, 1].
+    if do_auto:
+        if lohi is None:
+            lo, hi = oklab_autolevel_lohi(
+                arr, float(params.get("perceptual_autolevel_clip", 0.5)))
+        else:
+            lo, hi = float(lohi[0]), float(lohi[1])
+        if hi - lo > 1e-4:
+            L = np.clip((L - lo) / (hi - lo), 0.0, 1.0)
+
+    # Manual OKLCh knobs — neutral defaults (1.0 / 1.0 / 0) are a no-op.
+    if do_lch:
+        klight = float(params.get("perceptual_lightness", 1.0))     # contrast @ mid
+        if abs(klight - 1.0) > 1e-3:
+            L = np.clip((L - 0.5) * klight + 0.5, 0.0, 1.0)
+
+        kchroma = float(params.get("perceptual_chroma", 1.0))       # vividness
+        dhue = float(params.get("perceptual_hue", 0.0))             # degrees
+        if abs(kchroma - 1.0) > 1e-3 or abs(dhue) > 1e-3:
+            C = np.hypot(a, b) * max(0.0, kchroma)
+            h = np.arctan2(b, a) + np.deg2rad(dhue)
+            a, b = C * np.cos(h), C * np.sin(h)
+
+    out = oklab_to_srgb(np.stack([L, a, b], axis=-1))
+    out = np.clip(out, 0.0, 255.0).astype(np.uint8)
+    return Image.fromarray(out, mode="RGB")
+
+
 # --- Stage 6b: Pixelate ----------------------------------------------------
 
 def pixelate(rgba: Image.Image, factor: float,
@@ -2190,6 +2296,15 @@ def _stage_tone(rgb: Image.Image, params: dict) -> Image.Image:
     )
 
 
+def _stage_perceptual(rgb: Image.Image, params: dict) -> Image.Image:
+    """Perceptual OKLCh tone/colour adjust (RGB only). Runs after the legacy
+    RGB tone stage and before premultiply, so it sees straight-alpha RGB.
+    The ROI preview injects the whole-image auto-level bounds via `_roi_ctx`
+    so a zoomed crop stretches L identically to the full-image save."""
+    lohi = (params.get("_roi_ctx") or {}).get("oklab_L_lohi")
+    return perceptual_oklch(rgb, params, lohi=lohi)
+
+
 def _stage_premultiply(rgb: Image.Image, work_alpha: Image.Image,
                        params: dict) -> Image.Image:
     if params["premultiply"]:
@@ -2369,6 +2484,7 @@ def process_pil(img: Image.Image,
         work_alpha = _stage_alpha_shape(work_alpha, params)
         rgb = _stage_rgb_dilate(rgb_base, work_alpha, params)
         rgb = _stage_tone(rgb, params)
+        rgb = _stage_perceptual(rgb, params)
         rgb = _stage_premultiply(rgb, work_alpha, params)
         out = _stage_compose(rgb, work_alpha)
         out = _stage_pixelate(out, params)
@@ -2439,12 +2555,27 @@ def process_image(input_path,
 # stats (currently the quantise palette) are injected from the whole-image
 # low-res result so the crop's colours match the rest of the image.
 
-def compute_roi_ctx(last_after: Optional[Image.Image], params: dict) -> dict:
-    """Global context for a ROI crop, derived from the already-computed low-res
-    result so the crop matches the whole image. Currently: the quantise palette
-    (colour-count mode), so crops don't each derive their own palette."""
+def compute_roi_ctx(last_after: Optional[Image.Image], params: dict,
+                    source: Optional[Image.Image] = None) -> dict:
+    """Global context for a ROI crop, derived from the whole image so the crop
+    matches it. Currently: the quantise palette (colour-count mode) so crops
+    don't each derive their own palette, and the OKLab-L auto-level bounds so a
+    zoomed crop stretches lightness identically to the full-image save."""
     params = {**DEFAULT_PARAMS, **params}
     ctx: dict = {}
+
+    # Auto-level bounds from the WHOLE image's post-tone L. Derived from the
+    # source (not last_after, which is already auto-levelled), through the same
+    # tone stage the pipeline applies before the perceptual stage.
+    if params.get("perceptual_autolevel") and source is not None:
+        try:
+            toned = _stage_tone(source.convert("RGB"), params)
+            ctx["oklab_L_lohi"] = oklab_autolevel_lohi(
+                np.asarray(toned, dtype=np.uint8),
+                float(params.get("perceptual_autolevel_clip", 0.5)))
+        except Exception:
+            pass
+
     if last_after is None:
         return ctx
     if not params.get("quantize_use_palette"):
