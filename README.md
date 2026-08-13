@@ -20,7 +20,12 @@ It has a live **Tune** tab (single image, side‑by‑side before/after with zoo
 **Finishing**
 - **Pixelate** (fractional factors) and **soften edges** (alpha‑outline blur, RGB only).
 - Output **colour depth / palette**: reduce via libimagequant, with **dithering** (rendered at pixel‑art block resolution) and **custom‑palette matching** to any reference image.
-- A 5‑slot **post‑processing effects chain**: unsharp, bilateral smooth, emboss, chrome, bevel, Dave Hill, texturize, watercolor, screen effects, colour tint, film grain, frosted glass, lomo, oil paint, granulate, normal map, CRT scanlines.
+- A 5‑slot **post‑processing effects chain**: unsharp, bilateral smooth, saturation boost, emboss, chrome, bevel, Dave Hill, texturize, watercolor, screen effects (mesh / displace), colour tint, film grain, frosted glass, lomo, oil paint, granulate, turbulence, normal map, CRT scanlines.
+
+**Preview (Tune tab)**
+- Live before/after with linked zoom/pan and a cursor pixel readout (source x/y + RGBA under the mouse).
+- Stays smooth at any zoom level (only the visible region is rasterised).
+- **Full‑resolution accuracy** — when you zoom in on a large image the visible region is recomputed at full resolution, so what you see matches the saved output exactly instead of a scaled‑down approximation. (See [ROI_PREVIEW_IMPLEMENTATION.md](ROI_PREVIEW_IMPLEMENTATION.md) for how this works.)
 
 **Batch**
 - Parallel processing, presets (with per‑file auto‑pick), skip/overwrite handling, and **colour‑match to a reference frame** (Reinhard or histogram, in LAB/RGB) to kill colour flicker across animation frames.
@@ -50,7 +55,7 @@ The build bundles a portable ImageMagick — `setup.py` expects it at the path s
 ## Credits
 
 - Many of the post‑processing effects and colour operations are ports / reimplementations of **Fred Weinhaus's** ImageMagick scripts — <http://www.fmwconcepts.com/imagemagick/> (fuzzythresh, rangethresh, bevel, chrome, emboss, texturize, watercolor, screeneffects, levelcolors, Dave Hill effect).
-- Palette reduction + dithering approach inspired by [sd‑webui‑pixelart](https://github.com/mrpixel/sd-webui-pixelart).
+- Palette reduction + dithering approach inspired by [sd‑webui‑pixelart](https://github.com/mrreplicart/sd-webui-pixelart).
 - Colour reduction via [libimagequant / pngquant](https://pngquant.org/lib/); vectoriser via [vtracer](https://github.com/visioncortex/vtracer); effects via [ImageMagick](https://imagemagick.org/).
 
 ## License

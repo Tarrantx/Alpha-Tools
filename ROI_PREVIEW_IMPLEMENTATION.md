@@ -4,10 +4,12 @@ How the "zoom/pan is fast **and** the preview matches the full-res save" behavio
 was built, in enough detail to reproduce from scratch in another session.
 
 There are **two independent changes**. Part A is small and low-risk; Part B builds
-on it. In this repo they landed as:
+on it. Both are now **merged into `main`** (the `roi-preview` branch used during
+development has been fast-forwarded in). Original commits, for reference:
 
-- **Part A — viewport rendering** → committed on `main` (`8bdff3e`).
-- **Part B — ROI full-res preview** → committed on branch `roi-preview` (`fc20f35`).
+- **Part A — viewport rendering** → `8bdff3e`.
+- **Part B — ROI full-res preview** → `fc20f35` (developed on branch `roi-preview`,
+  now on `main`).
 
 Files touched: `main.py` (the `ZoomPanPreview` widget + the `TuneTab`) and
 `alpha_pipeline.py` (the pipeline). Nothing in the batch/save path changes — the
@@ -476,6 +478,10 @@ PreviewPipeline" regression.
 
 ## Git workflow used
 
+Part B was built on a throwaway branch so it stayed revertible during development,
+then fast-forward-merged into `main` and pushed once it was confirmed working. Both
+parts are now on `main`; the `roi-preview` branch is fully merged (safe to delete).
+
 ```bash
 # Part A committed to main (verified, low-risk):
 git add main.py
@@ -483,13 +489,11 @@ git commit -m "Preview: viewport rendering to fix zoom/pan lag at high zoom"
 
 # Fork for the experiment so it's revertible:
 git checkout -b roi-preview
-
-# Part B committed on the branch:
 git add main.py alpha_pipeline.py
 git commit -m "ROI full-res preview: show the accurate full-res result where zoomed in"
 
-# Revert the experiment:  git checkout main
-# Keep it:                git checkout main && git merge roi-preview
+# Merged back once verified:
+git checkout main && git merge --ff-only roi-preview && git push origin main
 ```
 
 ---
