@@ -2819,6 +2819,20 @@ class PreviewPipeline:
         def r_tone(s, p, tmp):
             s.rgb = _stage_tone(s.rgb, p)
 
+        def k_perceptual(p, t):
+            en = bool(p.get("perceptual_enabled", False))
+            au = bool(p.get("perceptual_autolevel", False))
+            if not (en or au):
+                return (False,)                    # disabled -> params irrelevant
+            return (en, au,
+                    p.get("perceptual_lightness", 1.0),
+                    p.get("perceptual_chroma", 1.0),
+                    p.get("perceptual_hue", 0.0),
+                    p.get("perceptual_autolevel_clip", 0.5))
+
+        def r_perceptual(s, p, tmp):
+            s.rgb = _stage_perceptual(s.rgb, p)
+
         def k_premult(p, t):
             return (bool(p["premultiply"]),)
 
@@ -2874,7 +2888,8 @@ class PreviewPipeline:
             (k_load, r_load), (k_build, r_build), (k_incong, r_incong),
             (k_refine, r_refine),
             (k_snap, r_snap), (k_clamp, r_clamp), (k_shape, r_shape),
-            (k_rgbdil, r_rgbdil), (k_tone, r_tone), (k_premult, r_premult),
+            (k_rgbdil, r_rgbdil), (k_tone, r_tone),
+            (k_perceptual, r_perceptual), (k_premult, r_premult),
             (k_compose, r_compose), (k_pix, r_pix), (k_soften, r_soften),
             (k_fx, r_fx), (k_colourmatch, r_colourmatch),
             (k_quant, r_quant),

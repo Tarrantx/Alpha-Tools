@@ -91,6 +91,35 @@ def test_alpha_untouched():
                               np.asarray(on.convert("RGB")))
 
 
+def test_preview_parity():
+    """The cached PreviewPipeline must match process_pil AND actually change
+    when a perceptual param moves (regression: the stage was missing from the
+    preview stage-table, so the live preview never updated)."""
+    rng = np.random.default_rng(7)
+    rgb = rng.integers(60, 140, size=(80, 80, 3)).astype(np.uint8)
+    img = Image.fromarray(np.dstack([rgb, np.full((80, 80), 255, np.uint8)]), "RGBA")
+    pp = ap.PreviewPipeline()
+
+    def a(im):
+        return np.asarray(im.convert("RGBA"), np.uint8)
+
+    p_on = {"perceptual_enabled": True, "perceptual_chroma": 1.7,
+            "perceptual_hue": 20.0, "perceptual_autolevel": True}
+    assert np.array_equal(a(pp.run(img, {})), a(ap.process_pil(img, {})))
+    assert np.array_equal(a(pp.run(img, p_on)), a(ap.process_pil(img, p_on)))
+
+    # Reproduce the reported bug: enable + nudge sliders, each must repaint.
+    pp2 = ap.PreviewPipeline()
+    base = a(pp2.run(img, {}))
+    s1 = a(pp2.run(img, {"perceptual_enabled": True, "perceptual_chroma": 1.7}))
+    s2 = a(pp2.run(img, {"perceptual_enabled": True, "perceptual_chroma": 1.9}))
+    s3 = a(pp2.run(img, {"perceptual_enabled": True, "perceptual_autolevel": True}))
+    assert not np.array_equal(base, s1), "enabling perceptual didn't change preview"
+    assert not np.array_equal(s1, s2), "moving chroma slider didn't change preview"
+    assert not np.array_equal(s1, s3), "auto-level toggle didn't change preview"
+    assert np.array_equal(base, a(pp2.run(img, {}))), "toggling off didn't restore"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
