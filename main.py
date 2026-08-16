@@ -1138,6 +1138,11 @@ class ZoomPanPreview(ctk.CTkFrame):
         # drag-pan events don't rebuild it 60 times a second.
         self._grid: dict | None = None
         self._grid_overlay_cache: tuple | None = None  # (key, RGBA image)
+        self._photo_grid: ImageTk.PhotoImage | None = None
+        # Source px per base (preview) px. >1 when the preview is downscaled to
+        # PREVIEW_MAX_DIM; keeps the grid on SOURCE-pixel boundaries (and aligned
+        # to the full-res detail overlay) instead of downscaled-preview pixels.
+        self._source_scale: float = 1.0
 
         # ROI full-res detail overlay: a full-resolution image covering a rect
         # (in BASE-image coords) drawn on top of the low-res crop where the user
@@ -1182,6 +1187,15 @@ class ZoomPanPreview(ctk.CTkFrame):
         (bx0,by0,bx1,by1 in base-image coords) on top of the low-res crop."""
         self._detail = None if detail_img is None else (tuple(base_rect), detail_img)
         self._render()
+
+    def set_source_scale(self, scale: float):
+        """Tell the pane how many SOURCE pixels each base (preview) pixel spans,
+        so the grid stays on source-pixel boundaries when the preview is
+        downscaled. 1.0 for images at or below PREVIEW_MAX_DIM."""
+        new = float(scale) if scale and scale > 0 else 1.0
+        if abs(new - self._source_scale) > 1e-9:
+            self._source_scale = new
+            self._render()
 
     def _schedule_settle(self):
         if self._settle_id is not None:
@@ -1353,8 +1367,6 @@ class ZoomPanPreview(ctk.CTkFrame):
         # LANCZOS otherwise (good quality downscale / mild upscale).
         resample = Image.Resampling.NEAREST if eff >= 1.5 else Image.Resampling.LANCZOS
         scaled = crop.resize((disp_w, disp_h), resample=resample)
-        if self._grid is not None:
-            scaled = self._apply_grid(scaled, eff, src_x0, src_y0)
         self._photo = ImageTk.PhotoImage(scaled)
 
         # Place the crop where its source top-left maps to on the canvas.
@@ -1365,6 +1377,11 @@ class ZoomPanPreview(ctk.CTkFrame):
         # Full-res detail overlay: draw the accurate full-resolution result on
         # top of the low-res crop wherever it's available and visible.
         self._draw_detail(eff, left, top, src_x0, src_y0, src_x1, src_y1)
+
+        # Grid LAST — on top of BOTH the low-res crop and the full-res detail.
+        # (Previously it was composited into the low-res crop and then hidden by
+        # the detail overlay whenever you zoomed in on a downscaled preview.)
+        self._draw_grid(eff, left, top, src_x0, src_y0, disp_w, disp_h)
 
     def _draw_detail(self, eff, left, top, vx0, vy0, vx1, vy1):
         if self._detail is None:
@@ -1397,59 +1414,72 @@ class ZoomPanPreview(ctk.CTkFrame):
     }
 
     @staticmethod
-    def _stripes(limit: int, step: float, half: float):
-        """Yield (lo, hi) integer pixel ranges for grid stripes along one
-        axis. Used for both vertical and horizontal line passes so the
-        per-axis loops collapse to one definition."""
-        p = 0.0
-        while p <= limit + 0.5:
-            lo = int(round(p - half))
-            hi = int(round(p + half)) - 1
-            if hi >= lo:
-                yield lo, hi
-            p += step
-
-    def _apply_grid(self, scaled: Image.Image, eff: float,
-                    src_x0: int, src_y0: int) -> Image.Image:
-        """Composite grid lines onto the visible crop `scaled`. Grid step is in
-        SOURCE-image pixels (a 16×16 grid lands on source pixel boundaries) and
-        stays aligned to the source through zoom + pan; line thickness is in
-        SCREEN pixels. Lines are placed at source multiples of `size`, offset by
-        the crop's source origin (src_x0, src_y0). The overlay is viewport-sized
-        so it's cheap to rebuild each frame."""
-        cfg = self._grid
-        size = int(cfg["size"])
-        step_screen = size * eff
+    def _grid_axis_lines(src0: float, extent: int, gstep_base: float,
+                         eff: float, width: int):
+        """(lo, hi) screen-pixel ranges for grid lines along one axis of a crop
+        whose base-coord origin is `src0`. Lines lie at base multiples of
+        `gstep_base`; positions are crop-local screen px, each `width` px thick.
+        Empty when the grid is denser than 2 screen px (would read as noise).
+        Uses a fixed integer width so a line always draws, even when it lands on
+        an exact pixel boundary (round-half-to-even would otherwise drop it)."""
+        out = []
+        if gstep_base <= 0:
+            return out
+        step_screen = gstep_base * eff
         if step_screen < 2:
-            # Grid is denser than the displayed image — would look like noise.
-            return scaled
-        dw, dh = scaled.size
+            return out
+        w = max(1, int(round(width)))
+        k = int(np.ceil(src0 / gstep_base))          # first line at/after origin
+        pos = (k * gstep_base - src0) * eff
+        while pos <= extent + 0.5:
+            lo = int(round(pos - w / 2.0))
+            hi = lo + w - 1
+            if hi >= 0 and lo <= extent - 1:
+                out.append((max(0, lo), min(extent - 1, hi)))
+            pos += step_screen
+        return out
+
+    def _build_grid_overlay(self, dw: int, dh: int, eff: float,
+                            src_x0: int, src_y0: int) -> Image.Image | None:
+        """Transparent RGBA overlay (dw×dh) of grid lines for the current
+        viewport crop, or None if the grid is off / too dense to show. Lines sit
+        on SOURCE-pixel multiples of cfg['size']: `_source_scale` converts source
+        px → base px (>1 when the preview is downscaled), so the grid lands on
+        source pixel boundaries and aligns with the full-res detail overlay.
+        Line thickness is in SCREEN pixels."""
+        cfg = self._grid
+        if cfg is None:
+            return None
+        scale = self._source_scale if self._source_scale > 0 else 1.0
+        gstep_base = int(cfg["size"]) / scale        # source px → base px
+        width = int(cfg["line_width"])
+        xs = self._grid_axis_lines(src_x0, dw, gstep_base, eff, width)
+        ys = self._grid_axis_lines(src_y0, dh, gstep_base, eff, width)
+        if not xs and not ys:
+            return None
         overlay = Image.new("RGBA", (dw, dh), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
-        rgb = self._GRID_COLORS[cfg["color"]]
-        fill = rgb + (110 if cfg["semi"] else 230,)
-        half = cfg["line_width"] / 2.0
+        fill = self._GRID_COLORS[cfg["color"]] + (110 if cfg["semi"] else 230,)
+        for lo, hi in xs:
+            draw.rectangle([lo, 0, hi, dh - 1], fill=fill)
+        for lo, hi in ys:
+            draw.rectangle([0, lo, dw - 1, hi], fill=fill)
+        return overlay
 
-        # First source grid line (multiple of `size`) at/after the crop origin;
-        # its crop-local screen position is (line_src - src_x0) * eff.
-        kx = -(-src_x0 // size)                 # ceil(src_x0 / size)
-        x = (kx * size - src_x0) * eff
-        while x <= dw + 0.5:
-            lo = int(round(x - half)); hi = int(round(x + half)) - 1
-            if hi >= lo:
-                draw.rectangle([lo, 0, hi, dh - 1], fill=fill)
-            x += step_screen
-        ky = -(-src_y0 // size)
-        y = (ky * size - src_y0) * eff
-        while y <= dh + 0.5:
-            lo = int(round(y - half)); hi = int(round(y + half)) - 1
-            if hi >= lo:
-                draw.rectangle([0, lo, dw - 1, hi], fill=fill)
-            y += step_screen
-
-        if scaled.mode != "RGBA":
-            scaled = scaled.convert("RGBA")
-        return Image.alpha_composite(scaled, overlay)
+    def _draw_grid(self, eff: float, left: float, top: float,
+                   src_x0: int, src_y0: int, dw: int, dh: int):
+        """Draw the grid overlay as the top-most canvas layer (above the low-res
+        crop and any full-res detail)."""
+        if self._grid is None:
+            self._photo_grid = None
+            return
+        overlay = self._build_grid_overlay(dw, dh, eff, src_x0, src_y0)
+        if overlay is None:
+            self._photo_grid = None
+            return
+        self._photo_grid = ImageTk.PhotoImage(overlay)
+        self.canvas.create_image(left + src_x0 * eff, top + src_y0 * eff,
+                                 image=self._photo_grid, anchor="nw")
 
     def _on_resize(self, _event):
         self._render()
@@ -4052,6 +4082,14 @@ class TuneTab(ctk.CTkFrame):
             self.before_view.set_placeholder("Load an image to begin")
             self.after_view.set_placeholder("Live preview")
             return
+        # Tell both panes the source→preview downscale so the grid overlay lands
+        # on source-pixel boundaries (set before set_image so the first render
+        # already uses it). >1 only when the image exceeds PREVIEW_MAX_DIM.
+        scale = 1.0
+        if self.source_image is not None and self.preview_source.width > 0:
+            scale = self.source_image.width / self.preview_source.width
+        self.before_view.set_source_scale(scale)
+        self.after_view.set_source_scale(scale)
         self.before_view.set_image(
             self._render_for_view(self.preview_source), reset_view=False,
         )
