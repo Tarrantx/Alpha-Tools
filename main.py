@@ -3758,10 +3758,14 @@ class ManualEditsPanel(ctk.CTkFrame):
         self._colour_btn.pack(side="left", padx=6)
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(fill="x", padx=6, pady=(6, 6))
-        ctk.CTkButton(btn_row, text="Save edits", width=100,
+        btn_row.pack(fill="x", padx=6, pady=(6, 2))
+        ctk.CTkButton(btn_row, text="Save edits…", width=100,
                       command=lambda: self.tune._save_edits()).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(btn_row, text="Delete all", width=100,
+        ctk.CTkButton(btn_row, text="Load edits…", width=100,
+                      command=lambda: self.tune._load_edits()).pack(side="left")
+        btn_row2 = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row2.pack(fill="x", padx=6, pady=(0, 6))
+        ctk.CTkButton(btn_row2, text="Delete all", width=100,
                       fg_color=("#b04a4a", "#7a3030"), hover_color=("#c25a5a", "#8a3838"),
                       command=lambda: self.tune._delete_all_edits()).pack(side="left")
 
@@ -4410,6 +4414,39 @@ class TuneTab(ctk.CTkFrame):
             self.status_label.configure(text=f"Saved edits: {Path(path).name}")
         except Exception as e:
             messagebox.showerror("Save edits failed", str(e))
+
+    def _load_edits(self):
+        """Load a saved edit layer from any sidecar onto the current image.
+        Same-size images load verbatim; a different size is placed at the same
+        x,y and clipped."""
+        if self.edit is None or self.source_image is None:
+            messagebox.showinfo("Load edits", "Load an image first.")
+            return
+        import manual_edits
+        path = filedialog.askopenfilename(
+            title="Load manual edits",
+            initialdir=load_dialog_dir("load_image"),
+            filetypes=[("Edit layer", "*.npz"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            loaded = manual_edits.EditLayer.load(path)
+        except Exception as e:
+            messagebox.showerror("Load edits failed", f"Couldn't read the edits:\n{e}")
+            return
+        w, h = self.source_image.width, self.source_image.height
+        if (loaded.w, loaded.h) != (w, h):
+            if not messagebox.askyesno(
+                    "Different image size",
+                    f"These edits were made for a {loaded.w}×{loaded.h} image, but "
+                    f"the current one is {w}×{h}.\n\nApply them at the same x,y "
+                    "(clipped to fit)?"):
+                return
+        new_layer = loaded.placed_into(w, h)
+        self.edit.layer = new_layer
+        self.params["_manual_edits"] = new_layer
+        self._on_edit_change()          # refresh the preview
+        self.status_label.configure(text=f"Loaded edits: {Path(path).name}")
 
     def _delete_all_edits(self):
         if self.edit is None or self.edit.layer.is_empty():

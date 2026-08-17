@@ -104,6 +104,20 @@ def test_apply_region_crop_exact():
     assert out[8, 8] == 55 and out[0, 0] == 255
 
 
+def test_placed_into():
+    """placed_into: same size = verbatim (no undo); different size = fixed x,y,
+    clipped — used to load edits onto a new image."""
+    L = me.EditLayer(100, 100)
+    L.begin_stroke(); L.apply_dab(10, 10, 4, "alpha", "paint", alpha_value=200); L.end_stroke()
+    L.begin_stroke(); L.apply_dab(90, 90, 4, "rgb", "paint", rgb_value=(1, 2, 3)); L.end_stroke()
+    same = L.placed_into(100, 100)
+    assert same.alpha_mask[10, 10] and not same.can_undo()
+    small = L.placed_into(60, 60)                     # onto a smaller image
+    assert (small.w, small.h) == (60, 60)
+    assert small.alpha_mask[10, 10] == True           # in-bounds edit kept
+    assert not small.rgb_mask[59, 59]                 # (90,90) clipped away
+
+
 def test_apply_place_batch_clip():
     L = me.EditLayer(64, 64)
     L.begin_stroke(); L.apply_dab(10, 10, 6, "rgb", "paint", rgb_value=(7, 8, 9)); L.end_stroke()

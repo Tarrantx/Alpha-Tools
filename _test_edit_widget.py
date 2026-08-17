@@ -192,6 +192,52 @@ def test_alpha_edit_in_texture_view():
         _teardown(app)
 
 
+def test_load_edits_onto_new_image():
+    """Save a sidecar from one image, then load it onto a different-size image
+    via _load_edits (file dialog + confirm monkeypatched). Skipped if no GUI."""
+    try:
+        import os
+        import customtkinter as ctk
+        import main
+        import manual_edits as me3
+        from PIL import Image
+        app = main.AlphaToolsApp(); app.withdraw(); app.update_idletasks()
+    except Exception as e:
+        print("SKIP load-edits (no GUI):", e)
+        return
+    try:
+        t = app.tune
+        # Make + save an edit layer for a 100x100 image.
+        t.source_image = Image.new("RGBA", (100, 100), (10, 20, 30, 255))
+        t.source_path = "_le_a.png"
+        t.preview_source = t._make_preview_source(t.source_image)
+        t._init_edit_layer()
+        t._set_edit_enabled(True)
+        t.edit.channel = "alpha"; t.edit.brush = 6; t.edit.alpha_value = 200
+        t._edit_begin(40, 40); t._edit_end()
+        sidecar = str(me3.EditLayer.sidecar_path("_le_a.png"))
+        t._save_edits()
+        assert os.path.exists(sidecar)
+
+        # Switch to a different-size image with NO matching sidecar.
+        t.source_image = Image.new("RGBA", (80, 80), (0, 0, 0, 255))
+        t.source_path = "_le_b.png"
+        t.preview_source = t._make_preview_source(t.source_image)
+        t._init_edit_layer()
+        assert t.edit.layer.is_empty()               # nothing auto-loaded
+
+        # Load the saved sidecar onto it (monkeypatch the dialogs).
+        main.filedialog.askopenfilename = lambda **k: sidecar
+        main.messagebox.askyesno = lambda *a, **k: True
+        t._load_edits()
+        assert (t.edit.layer.w, t.edit.layer.h) == (80, 80)   # sized to current img
+        assert t.edit.layer.alpha_mask[40, 40] and t.edit.layer.alpha[40, 40] == 200
+        assert t.params["_manual_edits"] is t.edit.layer
+        os.remove(sidecar)
+    finally:
+        _teardown(app)
+
+
 def test_ctrl_click_picks():
     """Ctrl+left-click samples a value (no stroke), regardless of the tool."""
     try:
@@ -286,7 +332,7 @@ def test_panel_integration():
 _GUI_TESTS = {
     "test_widget_paint_and_pan", "test_app_integration",
     "test_alpha_edit_in_texture_view", "test_ctrl_click_picks",
-    "test_panel_integration",
+    "test_panel_integration", "test_load_edits_onto_new_image",
 }
 
 if __name__ == "__main__":

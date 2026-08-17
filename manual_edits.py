@@ -227,6 +227,21 @@ class EditLayer:
         c._version = self._version
         return c
 
+    def placed_into(self, w: int, h: int) -> "EditLayer":
+        """A copy of this layer sized (w, h): identical when the size matches,
+        otherwise pasted at (0,0) and clipped (fixed x,y). Used when loading a
+        saved edit layer onto a different image."""
+        if (self.w, self.h) == (int(w), int(h)):
+            return self.flatten()
+        c = EditLayer(int(w), int(h))
+        hh, ww = min(c.h, self.h), min(c.w, self.w)
+        c.rgb[:hh, :ww] = self.rgb[:hh, :ww]
+        c.rgb_mask[:hh, :ww] = self.rgb_mask[:hh, :ww]
+        c.alpha[:hh, :ww] = self.alpha[:hh, :ww]
+        c.alpha_mask[:hh, :ww] = self.alpha_mask[:hh, :ww]
+        c._version = self._version
+        return c
+
     @staticmethod
     def sidecar_path(image_path) -> Path:
         p = Path(image_path)
