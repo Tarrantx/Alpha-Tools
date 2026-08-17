@@ -11,6 +11,22 @@ import numpy as np
 import manual_edits as me
 
 
+def _teardown(w):
+    """Destroy a Tk root and reset the default-root/image state so the next
+    GUI test in this process starts from a clean interpreter (avoids stale
+    'pyimageN' handles leaking across roots)."""
+    try:
+        w.destroy()
+    except Exception:
+        pass
+    try:
+        import tkinter, gc
+        tkinter._default_root = None
+        gc.collect()
+    except Exception:
+        pass
+
+
 # -- EditController (no GUI) -------------------------------------------------
 def test_controller_paint_stroke():
     L = me.EditLayer(200, 200)
@@ -79,7 +95,7 @@ def test_widget_paint_and_pan():
         pane.on_paint_end = ctrl.end
         pane.set_edit_mode(True, 10)
 
-        E = lambda x, y: types.SimpleNamespace(x=x, y=y)
+        E = lambda x, y: types.SimpleNamespace(x=x, y=y, state=0)
         sp = pane._canvas_to_source_px(200, 150)      # canvas centre -> source px
         assert sp is not None
         # A left click in edit mode must paint the layer at those SOURCE coords.
@@ -106,7 +122,7 @@ def test_widget_paint_and_pan():
         pane._on_left_press(E(200, 150)); pane._on_left_drag(E(240, 150)); pane._on_left_release(E(240, 150))
         assert pane._offset_x != ox2, "left-drag didn't pan when not editing"
     finally:
-        root.destroy()
+        _teardown(root)
 
 
 def test_app_integration():
@@ -128,20 +144,83 @@ def test_app_integration():
         t.preview_source = t._make_preview_source(t.source_image)
         t._init_edit_layer()
         assert t.edit is not None and "_manual_edits" in t.params
-        t._show_alpha_only.set(True); t._update_edit_mode()
-        assert t.after_view._edit_active and t.edit.channel == "alpha"
-        t.edit.brush = 8; t.edit.alpha_value = 200
+        # View modes must NOT enable editing on their own.
+        t._show_alpha_only.set(True); t._on_view_mode_changed("alpha")
+        assert not t.after_view._edit_active
+        # Explicit toggle turns it on; channel is independent of the view.
+        t._set_edit_enabled(True)
+        assert t.after_view._edit_active
+        t.edit.channel = "alpha"; t.edit.brush = 8; t.edit.alpha_value = 200
         t._edit_begin(150, 100); t._edit_end()
         assert t.edit.layer.alpha_mask[100, 150]
+        # Picker tool is one-shot -> reverts to pencil.
         t.last_after = t.source_image
         t.edit.tool = "picker"; t._edit_begin(150, 100)
         assert t.edit.tool == "pencil" and t.edit.alpha_value == 255
         t._edit_undo()
         assert t.edit.layer.is_empty()
-        t._show_alpha_only.set(False); t._update_edit_mode()
+        t._set_edit_enabled(False)
         assert not t.after_view._edit_active
     finally:
-        app.destroy()
+        _teardown(app)
+
+
+def test_alpha_edit_in_texture_view():
+    """Alpha can be painted while the texture-only view is active (channel is
+    decoupled from the view mode). Skipped if no display."""
+    try:
+        import customtkinter as ctk
+        import main
+        from PIL import Image
+        app = main.AlphaToolsApp(); app.withdraw(); app.update_idletasks()
+    except Exception as e:
+        print("SKIP alpha-in-texture-view (no GUI):", e)
+        return
+    try:
+        t = app.tune
+        t.source_image = Image.new("RGBA", (200, 200), (100, 120, 140, 255))
+        t.source_path = None
+        t.preview_source = t._make_preview_source(t.source_image)
+        t._init_edit_layer()
+        t._show_texture_only.set(True); t._on_view_mode_changed("texture")
+        t._set_edit_enabled(True)
+        t.edit.channel = "alpha"; t.edit.brush = 6; t.edit.alpha_value = 0
+        assert t.after_view._edit_active
+        t._edit_begin(100, 100); t._edit_end()
+        assert t.edit.layer.alpha_mask[100, 100] and t.edit.layer.alpha[100, 100] == 0
+    finally:
+        _teardown(app)
+
+
+def test_ctrl_click_picks():
+    """Ctrl+left-click samples a value (no stroke), regardless of the tool."""
+    try:
+        import customtkinter as ctk
+        import main
+        from PIL import Image
+        root = ctk.CTk(); root.withdraw()
+    except Exception as e:
+        print("SKIP ctrl-click pick (no GUI):", e)
+        return
+    try:
+        pane = main.ZoomPanPreview(root)
+        pane.canvas.winfo_width = lambda: 400
+        pane.canvas.winfo_height = lambda: 300
+        pane.set_source_scale(1.0)
+        pane.set_image(Image.new("RGB", (300, 200), (0, 0, 0)))
+        picked, painted = [], []
+        pane.on_paint_pick = lambda sx, sy: picked.append((sx, sy))
+        pane.on_paint_begin = lambda sx, sy: painted.append((sx, sy))
+        pane.set_edit_mode(True, 6)
+        E = lambda x, y, state=0: types.SimpleNamespace(x=x, y=y, state=state)
+        pane._on_left_press(E(200, 150, state=0x0004))    # Ctrl held
+        pane._on_left_release(E(200, 150, state=0x0004))
+        assert picked and not painted and not pane._left_paint
+        # Without Ctrl, the same click paints.
+        pane._on_left_press(E(200, 150, state=0))
+        assert painted
+    finally:
+        _teardown(root)
 
 
 def test_panel_integration():
@@ -166,23 +245,23 @@ def test_panel_integration():
         t.source_path = None
         t.preview_source = t._make_preview_source(t.source_image)
         t._init_edit_layer()
-        t._show_alpha_only.set(True); t._on_view_mode_changed("alpha")
-        assert t.after_view._edit_active and t.edit.channel == "alpha"
+        # Enable via the panel toggle (NOT the view mode); channel via selector.
+        p._enable_var.set(True); t._set_edit_enabled(True)
+        assert t.after_view._edit_active
+        p._chan_var.set("Alpha"); p._push()
+        assert t.edit.channel == "alpha"
 
         p._size_var.set(4); p._bump_size(1)
         p._alpha_var.set(180); p._on_alpha(180)
         p._tool_var.set("Eraser"); p._push()
         assert (t.edit.brush, t.edit.alpha_value, t.edit.tool) == (5, 180, "eraser")
 
-        t._show_texture_only.set(True); t._show_alpha_only.set(False)
-        t._on_view_mode_changed("texture")
-        p._rgb_hex = "#00FF80"; p._push()
+        p._chan_var.set("RGB"); p._rgb_hex = "#00FF80"; p._push()
         assert t.edit.channel == "rgb" and t.edit.rgb_value == (0, 255, 128)
 
-        # Picker reflects into the panel.
+        # Picker reflects into the panel and reverts the tool.
         t.last_after = t.source_image
-        t._show_alpha_only.set(True); t._show_texture_only.set(False)
-        t._on_view_mode_changed("alpha")
+        p._chan_var.set("Alpha"); p._push()
         t.edit.tool = "picker"; t._edit_begin(150, 100)
         assert p._tool_var.get() == "Pencil" and p._alpha_var.get() == 255
 
@@ -195,15 +274,40 @@ def test_panel_integration():
         assert os.path.exists(sc)
         os.remove(sc)
 
-        t._stop_editing()
+        # Turning the toggle off disables editing.
+        p._enable_var.set(False); t._set_edit_enabled(False)
         assert not t.after_view._edit_active
     finally:
-        app.destroy()
+        _teardown(app)
 
+
+# GUI tests each create + destroy a Tk root; Tk doesn't cleanly support several
+# roots in one process (stale image handles), so each runs in its own process.
+_GUI_TESTS = {
+    "test_widget_paint_and_pan", "test_app_integration",
+    "test_alpha_edit_in_texture_view", "test_ctrl_click_picks",
+    "test_panel_integration",
+}
 
 if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for t in tests:
-        t()
-        print(f"PASS  {t.__name__}")
-    print(f"\nAll {len(tests)} edit-widget tests passed.")
+    import sys
+    import subprocess
+    names = sorted(k for k in globals() if k.startswith("test_"))
+    if len(sys.argv) > 1:                      # child: run one named test
+        globals()[sys.argv[1]]()
+        print(f"PASS  {sys.argv[1]}")
+        sys.exit(0)
+    passed = 0
+    for name in names:
+        if name in _GUI_TESTS:                 # isolate in a fresh interpreter
+            r = subprocess.run([sys.executable, __file__, name],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"FAIL  {name}\n{r.stdout}{r.stderr}")
+                sys.exit(1)
+            print(r.stdout.strip() or f"PASS  {name}")
+        else:
+            globals()[name]()
+            print(f"PASS  {name}")
+        passed += 1
+    print(f"\nAll {passed} edit-widget tests passed.")

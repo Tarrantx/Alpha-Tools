@@ -1163,6 +1163,7 @@ class ZoomPanPreview(ctk.CTkFrame):
         self.on_paint_begin = None                  # (sx, sy)
         self.on_paint_to = None                     # (sx, sy)
         self.on_paint_end = None                    # ()
+        self.on_paint_pick = None                   # (sx, sy) — Ctrl+left-click
 
         bg = "#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#dbdbdb"
         self.canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=bg)
@@ -1357,15 +1358,21 @@ class ZoomPanPreview(ctk.CTkFrame):
         return (base[0] * scale, base[1] * scale)
 
     def _on_left_press(self, event):
-        if self._edit_active and self.on_paint_begin is not None:
-            self._left_paint = True
-            sp = self._canvas_to_source_px(event.x, event.y)
-            if sp is not None:
-                self.on_paint_begin(sp[0], sp[1])
-            self._update_brush_cursor(event.x, event.y)
-        else:
+        if not self._edit_active:
             self._left_paint = False
-            self._on_press(event)
+            self._on_press(event)                    # pan
+            return
+        sp = self._canvas_to_source_px(event.x, event.y)
+        # Ctrl+left-click = eyedropper pick, whatever the current tool is.
+        if event.state & 0x0004:                     # Control held
+            self._left_paint = False
+            if sp is not None and self.on_paint_pick is not None:
+                self.on_paint_pick(sp[0], sp[1])
+            return
+        self._left_paint = True
+        if sp is not None and self.on_paint_begin is not None:
+            self.on_paint_begin(sp[0], sp[1])
+        self._update_brush_cursor(event.x, event.y)
 
     def _on_left_drag(self, event):
         if self._left_paint:
@@ -3688,10 +3695,31 @@ class ManualEditsPanel(ctk.CTkFrame):
 
     def _build(self):
         SectionHeader(self, text="Manual edits").pack(fill="x", pady=(6, 2))
+
+        # Explicit on/off — the view modes no longer force editing, so the
+        # alpha-only / texture-only views can be used for inspection as usual.
+        self._enable_var = tk.BooleanVar(value=False)
+        self._enable_cb = ctk.CTkCheckBox(
+            self, text="Enable editing", variable=self._enable_var,
+            command=lambda: self.tune._set_edit_enabled(bool(self._enable_var.get())))
+        self._enable_cb.pack(fill="x", padx=6, pady=(0, 2))
+
         self._hint = ctk.CTkLabel(
             self, text="", wraplength=280, justify="left", anchor="w",
             font=ctk.CTkFont(size=11), text_color=("#666", "#aaa"))
         self._hint.pack(fill="x", padx=6, pady=(0, 4))
+
+        # Channel is chosen explicitly (not derived from the view mode) so you
+        # can paint alpha while looking at the texture — easiest for spotting
+        # where full transparency belongs.
+        ch_row = ctk.CTkFrame(self, fg_color="transparent")
+        ch_row.pack(fill="x", padx=6, pady=2)
+        ctk.CTkLabel(ch_row, text="Channel:", anchor="w", width=58).pack(side="left")
+        self._chan_var = tk.StringVar(value="Alpha")
+        self._chan = ctk.CTkSegmentedButton(
+            ch_row, values=["Alpha", "RGB"], variable=self._chan_var,
+            command=lambda _v: self._push())
+        self._chan.pack(side="left", fill="x", expand=True)
 
         self._tool_var = tk.StringVar(value="Pencil")
         self._tools = ctk.CTkSegmentedButton(
@@ -3731,15 +3759,13 @@ class ManualEditsPanel(ctk.CTkFrame):
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=6, pady=(6, 6))
-        ctk.CTkButton(btn_row, text="Stop editing", width=88,
-                      command=lambda: self.tune._stop_editing()).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(btn_row, text="Save edits", width=84,
+        ctk.CTkButton(btn_row, text="Save edits", width=100,
                       command=lambda: self.tune._save_edits()).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(btn_row, text="Delete all", width=80,
+        ctk.CTkButton(btn_row, text="Delete all", width=100,
                       fg_color=("#b04a4a", "#7a3030"), hover_color=("#c25a5a", "#8a3838"),
                       command=lambda: self.tune._delete_all_edits()).pack(side="left")
 
-        self.set_enabled(False, None)
+        self.set_enabled(False, None, False)
 
     def _bump_size(self, d):
         self._size_var.set(max(1, min(256, self._size_var.get() + d)))
@@ -3762,6 +3788,7 @@ class ManualEditsPanel(ctk.CTkFrame):
         e = self.tune.edit
         if e is None:
             return
+        e.channel = "alpha" if self._chan_var.get() == "Alpha" else "rgb"
         e.tool = self._TOOL_MAP.get(self._tool_var.get(), "pencil")
         e.brush = int(self._size_var.get())
         e.alpha_value = int(self._alpha_var.get())
@@ -3772,13 +3799,15 @@ class ManualEditsPanel(ctk.CTkFrame):
         """Called when a new per-image controller is created."""
         self._push()
 
-    def reflect_picked_value(self):
-        """The value picker set a value and reverted to pencil — mirror it."""
+    def reflect_picked_value(self, reset_tool: bool = True):
+        """A pick (Picker tool or Ctrl+click) set a value — mirror it. Only the
+        one-shot Picker tool reverts to pencil; Ctrl+click keeps the tool."""
         e = self.tune.edit
         if e is None:
             return
-        self._tool_var.set("Pencil")
-        self._tools.set("Pencil")
+        if reset_tool:
+            self._tool_var.set("Pencil")
+            self._tools.set("Pencil")
         if e.channel == "alpha":
             self._alpha_var.set(int(e.alpha_value))
             self._alpha_slider.set(int(e.alpha_value))
@@ -3786,25 +3815,28 @@ class ManualEditsPanel(ctk.CTkFrame):
             self._rgb_hex = _rgb_to_hex(e.rgb_value)
             self._colour_btn.configure(fg_color=self._rgb_hex, hover_color=self._rgb_hex)
 
-    def set_enabled(self, active: bool, channel):
-        """Enable controls per edit state; the alpha slider and colour picker
-        follow the active channel."""
+    def set_enabled(self, active: bool, channel, image_loaded: bool):
+        """Enable checkbox follows whether an image is loaded; the tools/channel
+        follow the edit toggle; alpha slider / colour picker follow the channel."""
         def _cfg(w, on):
             try:
                 w.configure(state="normal" if on else "disabled")
             except Exception:
                 pass
-        for w in (self._tools, self._size_minus, self._size_plus):
+        _cfg(self._enable_cb, image_loaded)
+        for w in (self._chan, self._tools, self._size_minus, self._size_plus):
             _cfg(w, active)
         _cfg(self._alpha_slider, active and channel == "alpha")
         _cfg(self._colour_btn, active and channel == "rgb")
-        if not active:
-            self._hint.configure(
-                text="Tick “Show alpha only” or “Show texture only” to edit.")
+        if not image_loaded:
+            self._hint.configure(text="Load an image to paint.")
+        elif not active:
+            self._hint.configure(text="Tick “Enable editing” to paint.")
         else:
             ch = "Alpha" if channel == "alpha" else "RGB colour"
             self._hint.configure(
-                text=f"Editing {ch} — left-drag paints, right-drag pans, Ctrl+Z undo.")
+                text=f"Editing {ch} — left-drag paints, Ctrl+left-click picks, "
+                     "right-drag pans, Ctrl+Z undo.")
 
 
 class TuneTab(ctk.CTkFrame):
@@ -3815,6 +3847,7 @@ class TuneTab(ctk.CTkFrame):
         self.source_path: str | None = None                # path it was loaded from
         self.preview_source: Image.Image | None = None     # downscaled RGBA
         self.last_after: Image.Image | None = None
+        self._edit_enabled = False                         # manual-edit on/off
 
         self._debounce_after_id: str | None = None
         self._show_alpha_only = tk.BooleanVar(value=False)
@@ -3993,6 +4026,8 @@ class TuneTab(ctk.CTkFrame):
         self.after_view.on_paint_begin = self._edit_begin
         self.after_view.on_paint_to = self._edit_to
         self.after_view.on_paint_end = self._edit_end
+        self.after_view.on_paint_pick = lambda sx, sy: self._pick_value(
+            sx, sy, reset_tool=False)               # Ctrl+left-click eyedropper
         for seq in ("<Control-z>", "<Control-Z>"):
             self.after_view.canvas.bind(seq, lambda e: self._edit_undo())
 
@@ -4287,30 +4322,33 @@ class TuneTab(ctk.CTkFrame):
                     pass
         self.edit = manual_edits.EditController(layer, on_change=self._on_edit_change)
         self.params["_manual_edits"] = layer
+        self._edit_enabled = False                 # editing starts off per image
         if hasattr(self, "manual_edits_panel"):
             self.manual_edits_panel.sync_to_controller()
         self._update_edit_mode()
 
+    def _set_edit_enabled(self, on: bool):
+        self._edit_enabled = bool(on)
+        self._update_edit_mode()
+
     def _update_edit_mode(self):
-        """Editing is enabled only when exactly one of the alpha-only / texture-
-        only view modes is on; that mode selects the target channel."""
-        alpha_only = bool(self._show_alpha_only.get())
-        texture_only = bool(self._show_texture_only.get())
-        active = self.edit is not None and (alpha_only != texture_only)
-        channel = None
-        if active:
-            channel = "alpha" if alpha_only else "rgb"
-            self.edit.channel = channel
+        """Editing is on only when the explicit toggle is set (independent of the
+        view modes). The channel comes from the panel's channel selector, so you
+        can paint alpha while viewing the texture."""
+        image_loaded = self.edit is not None
+        active = image_loaded and self._edit_enabled
+        channel = self.edit.channel if self.edit is not None else "alpha"
         brush = self.edit.brush if self.edit is not None else 4
         self.after_view.set_edit_mode(active, brush)
         if hasattr(self, "manual_edits_panel"):
-            self.manual_edits_panel.set_enabled(active, channel)
+            self.manual_edits_panel._enable_var.set(self._edit_enabled)
+            self.manual_edits_panel.set_enabled(active, channel, image_loaded)
 
     def _edit_begin(self, sx, sy):
         if self.edit is None:
             return
         if self.edit.tool == "picker":
-            self._pick_value(sx, sy)
+            self._pick_value(sx, sy, reset_tool=True)   # one-shot picker tool
         else:
             self.edit.begin(sx, sy)
 
@@ -4330,9 +4368,10 @@ class TuneTab(ctk.CTkFrame):
         """The edit layer changed — refresh the preview (debounced)."""
         self._schedule_preview()
 
-    def _pick_value(self, sx, sy):
-        """Value picker: sample the After result at source (sx, sy), set the
-        current channel's value, then revert to the pencil (one-shot)."""
+    def _pick_value(self, sx, sy, reset_tool: bool = True):
+        """Sample the After result at source (sx, sy) into the current channel's
+        value. From the Picker tool (reset_tool=True → revert to pencil) or from
+        Ctrl+left-click (reset_tool=False → keep the current tool)."""
         if self.edit is None or self.last_after is None:
             return
         pw = self.preview_source.width if self.preview_source else self.last_after.width
@@ -4347,20 +4386,10 @@ class TuneTab(ctk.CTkFrame):
             self.edit.alpha_value = int(px[3])
         else:
             self.edit.rgb_value = (int(px[0]), int(px[1]), int(px[2]))
-        self.edit.tool = "pencil"           # one-shot
-        self._on_edit_value_picked()        # Phase 3 hook: sync the UI widgets
-
-    def _on_edit_value_picked(self):
-        """Reflect a value the picker sampled back into the panel widgets."""
+        if reset_tool:
+            self.edit.tool = "pencil"
         if hasattr(self, "manual_edits_panel"):
-            self.manual_edits_panel.reflect_picked_value()
-
-    def _stop_editing(self):
-        """Leave edit mode by clearing both view-mode toggles."""
-        self._show_alpha_only.set(False)
-        self._show_texture_only.set(False)
-        self._redraw_previews()
-        self._update_edit_mode()
+            self.manual_edits_panel.reflect_picked_value(reset_tool)
 
     def _save_edits(self):
         """Write the manual edit layer to a sidecar next to the source image."""
