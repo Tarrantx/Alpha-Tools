@@ -101,11 +101,14 @@ class EditLayer:
             else:
                 self.rgb[y0:y1, x0:x1] = np.asarray(rgb_value, np.uint8)[:3]
                 self.rgb_mask[y0:y1, x0:x1] = True
+        # Bump per dab (not per stroke) so the live preview cache invalidates
+        # mid-drag; undo granularity stays per-stroke (begin/end_stroke).
+        self._version += 1
         if standalone:
             self.end_stroke()
 
     def end_stroke(self):
-        """Commit the active stroke to the undo history and bump the version."""
+        """Commit the active stroke to the undo history (version bumps per dab)."""
         if not self._pending:
             self._pending = None
             return
@@ -113,7 +116,6 @@ class EditLayer:
         if len(self._undo) > MAX_UNDO:
             self._undo.pop(0)
         self._pending = None
-        self._version += 1
 
     def _snapshot(self, x0, y0, x1, y1):
         self._pending.append((
@@ -147,6 +149,7 @@ class EditLayer:
         self.rgb_mask[:] = False
         self.alpha_mask[:] = False
         self.end_stroke()
+        self._version += 1
 
     # -- rendering into the pipeline ----------------------------------------
     def _render(self, channel: str, region, out_w: int, out_h: int, fit: str):
@@ -245,3 +248,69 @@ def apply_alpha(alpha_pil: Image.Image, layer: Optional[EditLayer],
     arr = np.array(alpha_pil.convert("L"), np.uint8)
     arr[mask] = vals[mask]
     return Image.fromarray(arr, "L")
+
+
+class EditController:
+    """Turns paint events (in SOURCE px) into EditLayer operations. GUI-free:
+    the preview widget reports press/drag/release; the UI panel sets the tool,
+    brush size and values. Interpolates dabs along a drag so fast strokes leave
+    no gaps. `on_change` fires after any layer mutation (to refresh the preview).
+    """
+    TOOLS = ("pencil", "eraser", "picker")
+
+    def __init__(self, layer: EditLayer, on_change=None):
+        self.layer = layer
+        self.tool = "pencil"
+        self.channel = "alpha"                 # set from the view mode
+        self.brush = 4                         # source px
+        self.alpha_value = 255
+        self.rgb_value = (255, 0, 0)
+        self.on_change = on_change
+        self._last = None
+        self._stroking = False
+
+    def _dab(self, sx, sy):
+        mode = "erase" if self.tool == "eraser" else "paint"
+        self.layer.apply_dab(sx, sy, self.brush, self.channel, mode,
+                             alpha_value=self.alpha_value, rgb_value=self.rgb_value)
+
+    def begin(self, sx, sy):
+        """Begin a paint/erase stroke. No-op for the picker (handled upstream)."""
+        if self.tool == "picker":
+            return
+        self.layer.begin_stroke()
+        self._stroking = True
+        self._last = (sx, sy)
+        self._dab(sx, sy)
+        self._changed()
+
+    def to(self, sx, sy):
+        if not self._stroking:
+            return
+        x0, y0 = self._last
+        dist = max(abs(sx - x0), abs(sy - y0))
+        steps = max(1, int(dist / max(1, self.brush / 2.0)))
+        for i in range(1, steps + 1):
+            self._dab(x0 + (sx - x0) * i / steps, y0 + (sy - y0) * i / steps)
+        self._last = (sx, sy)
+        self._changed()
+
+    def end(self):
+        if not self._stroking:
+            return
+        self.layer.end_stroke()
+        self._stroking = False
+        self._last = None
+        self._changed()
+
+    def undo(self):
+        if self.layer.undo():
+            self._changed()
+
+    def clear(self):
+        self.layer.clear()
+        self._changed()
+
+    def _changed(self):
+        if self.on_change:
+            self.on_change()

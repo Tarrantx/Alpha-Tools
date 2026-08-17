@@ -1154,15 +1154,26 @@ class ZoomPanPreview(ctk.CTkFrame):
         self._settle_id = None
         self._SETTLE_MS = 250
 
+        # Manual-edit painting. When active, LEFT-drag paints (via the callbacks,
+        # in SOURCE px); right-drag still pans. Owner sets the callbacks + mode.
+        self._edit_active = False
+        self._brush_size = 4                        # source px, for the cursor
+        self._left_paint = False                    # this left-drag is a paint
+        self._brush_cursor_id = None
+        self.on_paint_begin = None                  # (sx, sy)
+        self.on_paint_to = None                     # (sx, sy)
+        self.on_paint_end = None                    # ()
+
         bg = "#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#dbdbdb"
         self.canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=bg)
         self.canvas.pack(fill="both", expand=True)
 
-        self.canvas.bind("<ButtonPress-1>", self._on_press)
-        self.canvas.bind("<B1-Motion>", self._on_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        # Left button paints when edit mode is active, else pans.
+        self.canvas.bind("<ButtonPress-1>", self._on_left_press)
+        self.canvas.bind("<B1-Motion>", self._on_left_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_left_release)
         # Right-drag ALWAYS pans (right button is otherwise unused), so that
-        # once manual-edit mode makes left-drag paint, panning stays available.
+        # while manual-edit mode makes left-drag paint, panning stays available.
         self.canvas.bind("<ButtonPress-3>", self._on_press)
         self.canvas.bind("<B3-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-3>", self._on_release)
@@ -1316,16 +1327,89 @@ class ZoomPanPreview(ctk.CTkFrame):
     def _on_motion(self, event):
         if self.on_cursor_move is not None:
             self.on_cursor_move(self._canvas_to_image_px(event.x, event.y))
+        if self._edit_active:
+            self._update_brush_cursor(event.x, event.y)
 
     def _on_leave(self, _event):
         if self.on_cursor_move is not None:
             self.on_cursor_move(None)
+        self._clear_brush_cursor()
+
+    # -- manual-edit painting ------------------------------------------------
+
+    def set_edit_mode(self, active: bool, brush_size: int | None = None):
+        """Enable/disable painting. When active, left-drag paints via the
+        on_paint_* callbacks (right-drag still pans)."""
+        self._edit_active = bool(active)
+        if brush_size is not None:
+            self._brush_size = max(1, int(brush_size))
+        if self._base_img is not None:
+            self.canvas.configure(cursor="crosshair" if active else "fleur")
+        if not active:
+            self._clear_brush_cursor()
+
+    def _canvas_to_source_px(self, mx: float, my: float):
+        """Cursor position in full SOURCE-image px, or None if off-image."""
+        base = self._canvas_to_image_px(mx, my)
+        if base is None:
+            return None
+        scale = self._source_scale if self._source_scale > 0 else 1.0
+        return (base[0] * scale, base[1] * scale)
+
+    def _on_left_press(self, event):
+        if self._edit_active and self.on_paint_begin is not None:
+            self._left_paint = True
+            sp = self._canvas_to_source_px(event.x, event.y)
+            if sp is not None:
+                self.on_paint_begin(sp[0], sp[1])
+            self._update_brush_cursor(event.x, event.y)
+        else:
+            self._left_paint = False
+            self._on_press(event)
+
+    def _on_left_drag(self, event):
+        if self._left_paint:
+            sp = self._canvas_to_source_px(event.x, event.y)
+            if sp is not None and self.on_paint_to is not None:
+                self.on_paint_to(sp[0], sp[1])
+            self._update_brush_cursor(event.x, event.y)
+        else:
+            self._on_drag(event)
+
+    def _on_left_release(self, event):
+        if self._left_paint:
+            self._left_paint = False
+            if self.on_paint_end is not None:
+                self.on_paint_end()
+        else:
+            self._on_release(event)
+
+    def _update_brush_cursor(self, mx, my):
+        """Draw a square outline showing the brush footprint at the cursor."""
+        self._clear_brush_cursor()
+        if not self._edit_active or self._base_img is None:
+            return
+        eff = self._fit_factor() * self._zoom
+        scale = self._source_scale if self._source_scale > 0 else 1.0
+        side = max(2.0, self._brush_size * eff / scale)   # source px -> screen px
+        self._brush_cursor_id = self.canvas.create_rectangle(
+            mx - side / 2, my - side / 2, mx + side / 2, my + side / 2,
+            outline="#ff3030", width=1)
+
+    def _clear_brush_cursor(self):
+        if self._brush_cursor_id is not None:
+            try:
+                self.canvas.delete(self._brush_cursor_id)
+            except Exception:
+                pass
+            self._brush_cursor_id = None
 
     def _render(self):
         self.canvas.delete("all")
         self._photo = None
         self._image_id = None
         self._placeholder_id = None
+        self._brush_cursor_id = None            # cleared by canvas.delete("all")
 
         if self._base_img is None:
             cw = self.canvas.winfo_width() or 200
@@ -3761,6 +3845,14 @@ class TuneTab(ctk.CTkFrame):
         self.before_view.on_view_settle = self._on_view_settle
         self.after_view.on_view_settle = self._on_view_settle
 
+        # Manual editing happens on the After pane (the result being touched up).
+        self.edit = None                        # manual_edits.EditController per image
+        self.after_view.on_paint_begin = self._edit_begin
+        self.after_view.on_paint_to = self._edit_to
+        self.after_view.on_paint_end = self._edit_end
+        for seq in ("<Control-z>", "<Control-Z>"):
+            self.after_view.canvas.bind(seq, lambda e: self._edit_undo())
+
         # Status line
         self.status_label = ctk.CTkLabel(left, text="", anchor="w",
                                          font=ctk.CTkFont(size=11))
@@ -3795,6 +3887,7 @@ class TuneTab(ctk.CTkFrame):
         self.source_image = img
         self.source_path = path
         self.preview_source = self._make_preview_source(img)
+        self._init_edit_layer()             # fresh edit layer for this image
         self._redraw_previews()
         self._schedule_preview()
         self.status_label.configure(
@@ -4018,6 +4111,83 @@ class TuneTab(ctk.CTkFrame):
         elif which == "texture" and self._show_texture_only.get():
             self._show_alpha_only.set(False)
         self._redraw_previews()
+        self._update_edit_mode()            # after redraw, so the cursor wins
+
+    # -- manual edits --------------------------------------------------------
+
+    def _init_edit_layer(self):
+        """Fresh edit layer/controller for the current source image (loading a
+        new image clears prior edits)."""
+        import manual_edits
+        if self.source_image is None:
+            self.edit = None
+            self.params.pop("_manual_edits", None)
+            return
+        layer = manual_edits.EditLayer(self.source_image.width,
+                                       self.source_image.height)
+        self.edit = manual_edits.EditController(layer, on_change=self._on_edit_change)
+        self.params["_manual_edits"] = layer
+        self._update_edit_mode()
+
+    def _update_edit_mode(self):
+        """Editing is enabled only when exactly one of the alpha-only / texture-
+        only view modes is on; that mode selects the target channel."""
+        alpha_only = bool(self._show_alpha_only.get())
+        texture_only = bool(self._show_texture_only.get())
+        active = self.edit is not None and (alpha_only != texture_only)
+        if active:
+            self.edit.channel = "alpha" if alpha_only else "rgb"
+        brush = self.edit.brush if self.edit is not None else 4
+        self.after_view.set_edit_mode(active, brush)
+
+    def _edit_begin(self, sx, sy):
+        if self.edit is None:
+            return
+        if self.edit.tool == "picker":
+            self._pick_value(sx, sy)
+        else:
+            self.edit.begin(sx, sy)
+
+    def _edit_to(self, sx, sy):
+        if self.edit is not None and self.edit.tool != "picker":
+            self.edit.to(sx, sy)
+
+    def _edit_end(self):
+        if self.edit is not None and self.edit.tool != "picker":
+            self.edit.end()
+
+    def _edit_undo(self):
+        if self.edit is not None:
+            self.edit.undo()
+
+    def _on_edit_change(self):
+        """The edit layer changed — refresh the preview (debounced)."""
+        self._schedule_preview()
+
+    def _pick_value(self, sx, sy):
+        """Value picker: sample the After result at source (sx, sy), set the
+        current channel's value, then revert to the pencil (one-shot)."""
+        if self.edit is None or self.last_after is None:
+            return
+        pw = self.preview_source.width if self.preview_source else self.last_after.width
+        scale = (self.source_image.width / pw) if (self.source_image and pw) else 1.0
+        bx = int(min(self.last_after.width - 1, max(0, sx / scale)))
+        by = int(min(self.last_after.height - 1, max(0, sy / scale)))
+        try:
+            px = self.last_after.convert("RGBA").getpixel((bx, by))
+        except Exception:
+            return
+        if self.edit.channel == "alpha":
+            self.edit.alpha_value = int(px[3])
+        else:
+            self.edit.rgb_value = (int(px[0]), int(px[1]), int(px[2]))
+        self.edit.tool = "pencil"           # one-shot
+        self._on_edit_value_picked()        # Phase 3 hook: sync the UI widgets
+
+    def _on_edit_value_picked(self):
+        """Overridden/extended by the Phase 3 UI to reflect a picked value in
+        the alpha slider / colour swatch. No-op until then."""
+        pass
 
     def _on_bg_changed(self):
         """Redraw both panes when the solid-background toggle changes."""
