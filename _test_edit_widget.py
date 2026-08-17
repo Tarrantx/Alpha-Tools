@@ -144,6 +144,63 @@ def test_app_integration():
         app.destroy()
 
 
+def test_panel_integration():
+    """ManualEditsPanel drives the controller: tool/brush/alpha/colour push,
+    picker reflect, sidecar save, stop editing. Skipped if no display."""
+    try:
+        import os
+        import customtkinter as ctk
+        import main
+        import manual_edits as me2
+        from PIL import Image
+        app = main.AlphaToolsApp()
+        app.withdraw(); app.update_idletasks()
+    except Exception as e:
+        print("SKIP panel integration (no GUI):", e)
+        return
+    try:
+        t = app.tune
+        p = t.manual_edits_panel
+        assert isinstance(p, main.ManualEditsPanel)
+        t.source_image = Image.new("RGBA", (300, 200), (30, 60, 90, 255))
+        t.source_path = None
+        t.preview_source = t._make_preview_source(t.source_image)
+        t._init_edit_layer()
+        t._show_alpha_only.set(True); t._on_view_mode_changed("alpha")
+        assert t.after_view._edit_active and t.edit.channel == "alpha"
+
+        p._size_var.set(4); p._bump_size(1)
+        p._alpha_var.set(180); p._on_alpha(180)
+        p._tool_var.set("Eraser"); p._push()
+        assert (t.edit.brush, t.edit.alpha_value, t.edit.tool) == (5, 180, "eraser")
+
+        t._show_texture_only.set(True); t._show_alpha_only.set(False)
+        t._on_view_mode_changed("texture")
+        p._rgb_hex = "#00FF80"; p._push()
+        assert t.edit.channel == "rgb" and t.edit.rgb_value == (0, 255, 128)
+
+        # Picker reflects into the panel.
+        t.last_after = t.source_image
+        t._show_alpha_only.set(True); t._show_texture_only.set(False)
+        t._on_view_mode_changed("alpha")
+        t.edit.tool = "picker"; t._edit_begin(150, 100)
+        assert p._tool_var.get() == "Pencil" and p._alpha_var.get() == 255
+
+        # Save edits -> sidecar.
+        p._tool_var.set("Pencil"); p._push()
+        t._edit_begin(150, 100); t._edit_end()
+        t.source_path = "_sc_test.png"
+        t._save_edits()
+        sc = str(me2.EditLayer.sidecar_path("_sc_test.png"))
+        assert os.path.exists(sc)
+        os.remove(sc)
+
+        t._stop_editing()
+        assert not t.after_view._edit_active
+    finally:
+        app.destroy()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

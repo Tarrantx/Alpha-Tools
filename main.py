@@ -3664,6 +3664,149 @@ _GRID_WIDTH_OPTIONS = {
 }
 
 
+def _hex_to_rgb(h: str):
+    h = h.lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _rgb_to_hex(rgb):
+    return "#{:02X}{:02X}{:02X}".format(int(rgb[0]), int(rgb[1]), int(rgb[2]))
+
+
+class ManualEditsPanel(ctk.CTkFrame):
+    """Manual touch-up controls (top-right, under Save image). This UI is the
+    source of truth for the tool / brush / values; it pushes them onto the
+    TuneTab's per-image EditController. Editing itself is gated by the view mode
+    (exactly one of show-alpha-only / show-texture-only)."""
+    _TOOL_MAP = {"Pencil": "pencil", "Eraser": "eraser", "Picker": "picker"}
+
+    def __init__(self, parent, tune, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.tune = tune
+        self._rgb_hex = "#FF0000"
+        self._build()
+
+    def _build(self):
+        SectionHeader(self, text="Manual edits").pack(fill="x", pady=(6, 2))
+        self._hint = ctk.CTkLabel(
+            self, text="", wraplength=280, justify="left", anchor="w",
+            font=ctk.CTkFont(size=11), text_color=("#666", "#aaa"))
+        self._hint.pack(fill="x", padx=6, pady=(0, 4))
+
+        self._tool_var = tk.StringVar(value="Pencil")
+        self._tools = ctk.CTkSegmentedButton(
+            self, values=["Pencil", "Eraser", "Picker"],
+            variable=self._tool_var, command=lambda _v: self._push())
+        self._tools.pack(fill="x", padx=6, pady=2)
+
+        size_row = ctk.CTkFrame(self, fg_color="transparent")
+        size_row.pack(fill="x", padx=6, pady=2)
+        ctk.CTkLabel(size_row, text="Brush (px):", anchor="w").pack(side="left")
+        self._size_var = tk.IntVar(value=4)
+        self._size_minus = ctk.CTkButton(size_row, text="−", width=28,
+                                         command=lambda: self._bump_size(-1))
+        self._size_minus.pack(side="left", padx=(6, 2))
+        ctk.CTkLabel(size_row, textvariable=self._size_var, width=40).pack(side="left")
+        self._size_plus = ctk.CTkButton(size_row, text="+", width=28,
+                                        command=lambda: self._bump_size(1))
+        self._size_plus.pack(side="left", padx=(2, 0))
+
+        a_row = ctk.CTkFrame(self, fg_color="transparent")
+        a_row.pack(fill="x", padx=6, pady=2)
+        ctk.CTkLabel(a_row, text="Alpha:", anchor="w", width=48).pack(side="left")
+        self._alpha_var = tk.IntVar(value=255)
+        ctk.CTkLabel(a_row, textvariable=self._alpha_var, width=34).pack(side="right")
+        self._alpha_slider = ctk.CTkSlider(a_row, from_=0, to=255,
+                                          number_of_steps=255, command=self._on_alpha)
+        self._alpha_slider.set(255)
+        self._alpha_slider.pack(side="left", fill="x", expand=True, padx=6)
+
+        c_row = ctk.CTkFrame(self, fg_color="transparent")
+        c_row.pack(fill="x", padx=6, pady=2)
+        ctk.CTkLabel(c_row, text="Colour:", anchor="w", width=48).pack(side="left")
+        self._colour_btn = ctk.CTkButton(
+            c_row, text="", width=44, height=24, fg_color=self._rgb_hex,
+            hover_color=self._rgb_hex, command=self._pick_colour)
+        self._colour_btn.pack(side="left", padx=6)
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=6, pady=(6, 6))
+        ctk.CTkButton(btn_row, text="Stop editing", width=88,
+                      command=lambda: self.tune._stop_editing()).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(btn_row, text="Save edits", width=84,
+                      command=lambda: self.tune._save_edits()).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(btn_row, text="Delete all", width=80,
+                      fg_color=("#b04a4a", "#7a3030"), hover_color=("#c25a5a", "#8a3838"),
+                      command=lambda: self.tune._delete_all_edits()).pack(side="left")
+
+        self.set_enabled(False, None)
+
+    def _bump_size(self, d):
+        self._size_var.set(max(1, min(256, self._size_var.get() + d)))
+        self._push()
+
+    def _on_alpha(self, v):
+        self._alpha_var.set(int(round(float(v))))
+        self._push()
+
+    def _pick_colour(self):
+        from tkinter import colorchooser
+        r = colorchooser.askcolor(color=self._rgb_hex, title="Edit colour", parent=self)
+        if r and r[1]:
+            self._rgb_hex = r[1].upper()
+            self._colour_btn.configure(fg_color=self._rgb_hex, hover_color=self._rgb_hex)
+            self._push()
+
+    def _push(self):
+        """Push the UI selections onto the current controller."""
+        e = self.tune.edit
+        if e is None:
+            return
+        e.tool = self._TOOL_MAP.get(self._tool_var.get(), "pencil")
+        e.brush = int(self._size_var.get())
+        e.alpha_value = int(self._alpha_var.get())
+        e.rgb_value = _hex_to_rgb(self._rgb_hex)
+        self.tune._update_edit_mode()          # refresh brush-cursor size + gating
+
+    def sync_to_controller(self):
+        """Called when a new per-image controller is created."""
+        self._push()
+
+    def reflect_picked_value(self):
+        """The value picker set a value and reverted to pencil — mirror it."""
+        e = self.tune.edit
+        if e is None:
+            return
+        self._tool_var.set("Pencil")
+        self._tools.set("Pencil")
+        if e.channel == "alpha":
+            self._alpha_var.set(int(e.alpha_value))
+            self._alpha_slider.set(int(e.alpha_value))
+        else:
+            self._rgb_hex = _rgb_to_hex(e.rgb_value)
+            self._colour_btn.configure(fg_color=self._rgb_hex, hover_color=self._rgb_hex)
+
+    def set_enabled(self, active: bool, channel):
+        """Enable controls per edit state; the alpha slider and colour picker
+        follow the active channel."""
+        def _cfg(w, on):
+            try:
+                w.configure(state="normal" if on else "disabled")
+            except Exception:
+                pass
+        for w in (self._tools, self._size_minus, self._size_plus):
+            _cfg(w, active)
+        _cfg(self._alpha_slider, active and channel == "alpha")
+        _cfg(self._colour_btn, active and channel == "rgb")
+        if not active:
+            self._hint.configure(
+                text="Tick “Show alpha only” or “Show texture only” to edit.")
+        else:
+            ch = "Alpha" if channel == "alpha" else "RGB colour"
+            self._hint.configure(
+                text=f"Editing {ch} — left-drag paints, right-drag pans, Ctrl+Z undo.")
+
+
 class TuneTab(ctk.CTkFrame):
     def __init__(self, parent, params: dict, **kwargs):
         super().__init__(parent, **kwargs)
@@ -3858,12 +4001,18 @@ class TuneTab(ctk.CTkFrame):
                                          font=ctk.CTkFont(size=11))
         self.status_label.grid(row=4, column=0, sticky="ew", pady=(4, 0))
 
-        # Right column: image-modifying controls (vtracer, tone, pixelate, fx)
+        # Right column: manual-edits panel (top) + image-modifying controls.
+        right = ctk.CTkFrame(self, fg_color="transparent")
+        right.grid(row=0, column=2, sticky="nsew", padx=(4, 8), pady=8)
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)     # image panel expands
+        self.manual_edits_panel = ManualEditsPanel(right, self, width=300)
+        self.manual_edits_panel.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         self.image_panel = ParameterPanel(
-            self, self.params, on_change=self._on_param_change,
+            right, self.params, on_change=self._on_param_change,
             sections=IMAGE_SECTIONS, width=300,
         )
-        self.image_panel.grid(row=0, column=2, sticky="nsew", padx=(4, 8), pady=8)
+        self.image_panel.grid(row=1, column=0, sticky="nsew")
 
     # -- file ops ------------------------------------------------------------
 
@@ -4123,10 +4272,23 @@ class TuneTab(ctk.CTkFrame):
             self.edit = None
             self.params.pop("_manual_edits", None)
             return
-        layer = manual_edits.EditLayer(self.source_image.width,
-                                       self.source_image.height)
+        w, h = self.source_image.width, self.source_image.height
+        layer = manual_edits.EditLayer(w, h)
+        # Auto-load a matching sidecar if one sits next to the image.
+        if self.source_path:
+            sc = manual_edits.EditLayer.sidecar_path(self.source_path)
+            if sc.exists():
+                try:
+                    loaded = manual_edits.EditLayer.load(sc)
+                    if (loaded.w, loaded.h) == (w, h):
+                        layer = loaded
+                        self.status_label.configure(text=f"Loaded edits: {sc.name}")
+                except Exception:
+                    pass
         self.edit = manual_edits.EditController(layer, on_change=self._on_edit_change)
         self.params["_manual_edits"] = layer
+        if hasattr(self, "manual_edits_panel"):
+            self.manual_edits_panel.sync_to_controller()
         self._update_edit_mode()
 
     def _update_edit_mode(self):
@@ -4135,10 +4297,14 @@ class TuneTab(ctk.CTkFrame):
         alpha_only = bool(self._show_alpha_only.get())
         texture_only = bool(self._show_texture_only.get())
         active = self.edit is not None and (alpha_only != texture_only)
+        channel = None
         if active:
-            self.edit.channel = "alpha" if alpha_only else "rgb"
+            channel = "alpha" if alpha_only else "rgb"
+            self.edit.channel = channel
         brush = self.edit.brush if self.edit is not None else 4
         self.after_view.set_edit_mode(active, brush)
+        if hasattr(self, "manual_edits_panel"):
+            self.manual_edits_panel.set_enabled(active, channel)
 
     def _edit_begin(self, sx, sy):
         if self.edit is None:
@@ -4185,9 +4351,44 @@ class TuneTab(ctk.CTkFrame):
         self._on_edit_value_picked()        # Phase 3 hook: sync the UI widgets
 
     def _on_edit_value_picked(self):
-        """Overridden/extended by the Phase 3 UI to reflect a picked value in
-        the alpha slider / colour swatch. No-op until then."""
-        pass
+        """Reflect a value the picker sampled back into the panel widgets."""
+        if hasattr(self, "manual_edits_panel"):
+            self.manual_edits_panel.reflect_picked_value()
+
+    def _stop_editing(self):
+        """Leave edit mode by clearing both view-mode toggles."""
+        self._show_alpha_only.set(False)
+        self._show_texture_only.set(False)
+        self._redraw_previews()
+        self._update_edit_mode()
+
+    def _save_edits(self):
+        """Write the manual edit layer to a sidecar next to the source image."""
+        if self.edit is None or self.edit.layer.is_empty():
+            messagebox.showinfo("No edits", "There are no manual edits to save.")
+            return
+        import manual_edits
+        if self.source_path:
+            path = str(manual_edits.EditLayer.sidecar_path(self.source_path))
+        else:
+            path = filedialog.asksaveasfilename(
+                title="Save manual edits", defaultextension=".npz",
+                filetypes=[("Edit layer", "*.npz")])
+            if not path:
+                return
+        try:
+            self.edit.layer.save(path)
+            self.status_label.configure(text=f"Saved edits: {Path(path).name}")
+        except Exception as e:
+            messagebox.showerror("Save edits failed", str(e))
+
+    def _delete_all_edits(self):
+        if self.edit is None or self.edit.layer.is_empty():
+            return
+        if messagebox.askyesno(
+                "Delete all manual edits",
+                "Remove all manual edits? You can still undo with Ctrl+Z."):
+            self.edit.clear()
 
     def _on_bg_changed(self):
         """Redraw both panes when the solid-background toggle changes."""
