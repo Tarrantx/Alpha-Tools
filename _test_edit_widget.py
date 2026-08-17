@@ -238,6 +238,53 @@ def test_load_edits_onto_new_image():
         _teardown(app)
 
 
+def test_ctrl_zoom_center():
+    """Ctrl +/- zoom about the viewport centre: a centred image stays centred;
+    a panned view scales its offset so the centre is stable; mirrors to the
+    linked pane; clamps at the limits. Skipped if no display."""
+    try:
+        import customtkinter as ctk
+        import main
+        from PIL import Image
+        root = ctk.CTk(); root.withdraw()
+    except Exception as e:
+        print("SKIP ctrl-zoom (no GUI):", e)
+        return
+    try:
+        a = main.ZoomPanPreview(root)
+        b = main.ZoomPanPreview(root)
+        a.link_with(b)
+        for p in (a, b):
+            p.canvas.winfo_width = lambda: 400
+            p.canvas.winfo_height = lambda: 300
+            p.set_image(Image.new("RGB", (200, 200), (50, 50, 50)))
+
+        # Centred (offset 0): zoom in keeps it centred.
+        a._zoom, a._offset_x, a._offset_y = 1.0, 0, 0
+        a._zoom_by(1.25)
+        assert abs(a._zoom - 1.25) < 1e-6 and a._offset_x == 0 and a._offset_y == 0
+
+        # Panned: the offset scales with the zoom (viewport centre stays put).
+        a._zoom, a._offset_x, a._offset_y = 2.0, 40, 20
+        a._zoom_by(1.25)
+        assert abs(a._zoom - 2.5) < 1e-6
+        assert abs(a._offset_x - 50) < 1e-6 and abs(a._offset_y - 25) < 1e-6
+        # Mirrored to the linked pane.
+        assert abs(b._zoom - a._zoom) < 1e-6 and abs(b._offset_x - a._offset_x) < 1e-6
+
+        # Zoom out scales the other way.
+        a._zoom, a._offset_x, a._offset_y = 2.0, 40, 0
+        a._zoom_by(1 / 1.25)
+        assert abs(a._zoom - 1.6) < 1e-6 and abs(a._offset_x - 32) < 1e-6
+
+        # Clamp at the max — offset unchanged when the zoom can't grow.
+        a._zoom, a._offset_x = 40.0, 10
+        a._zoom_by(1.25)
+        assert a._zoom == 40.0 and a._offset_x == 10
+    finally:
+        _teardown(root)
+
+
 def test_ctrl_click_picks():
     """Ctrl+left-click samples a value (no stroke), regardless of the tool."""
     try:
@@ -333,6 +380,7 @@ _GUI_TESTS = {
     "test_widget_paint_and_pan", "test_app_integration",
     "test_alpha_edit_in_texture_view", "test_ctrl_click_picks",
     "test_panel_integration", "test_load_edits_onto_new_image",
+    "test_ctrl_zoom_center",
 }
 
 if __name__ == "__main__":

@@ -1183,6 +1183,12 @@ class ZoomPanPreview(ctk.CTkFrame):
         self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", self._on_leave)
+        # Ctrl +/- zoom about the viewport centre. '+' is Shift+'=' on most
+        # layouts, so bind '=' too; and the numpad keys.
+        for seq in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+            self.canvas.bind(seq, lambda e: self._zoom_by(1.25))
+        for seq in ("<Control-minus>", "<Control-KP_Subtract>"):
+            self.canvas.bind(seq, lambda e: self._zoom_by(1 / 1.25))
 
     # -- public API ----------------------------------------------------------
 
@@ -1609,6 +1615,24 @@ class ZoomPanPreview(ctk.CTkFrame):
         self._render()
         self._mirror_view()
         self._schedule_settle()
+
+    def _zoom_by(self, factor: float):
+        """Zoom by `factor` about the VIEWPORT centre — whatever is centred
+        stays centred (the pan offset scales with the zoom), so the image can't
+        drift out of the window. Used by the Ctrl +/- shortcuts."""
+        if self._base_img is None:
+            return "break"
+        new_zoom = max(0.1, min(40.0, self._zoom * factor))
+        applied = new_zoom / self._zoom
+        if applied == 1.0:                      # already at a zoom limit
+            return "break"
+        self._zoom = new_zoom
+        self._offset_x *= applied
+        self._offset_y *= applied
+        self._render()
+        self._mirror_view()
+        self._schedule_settle()
+        return "break"
 
     def _mirror_view(self):
         if self._mirroring:
