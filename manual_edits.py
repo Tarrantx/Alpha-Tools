@@ -215,6 +215,18 @@ class EditLayer:
             layer.alpha_mask = z["alpha_mask"]
         return layer
 
+    def flatten(self) -> "EditLayer":
+        """A copy holding just the pixel data (no undo history) — used for batch,
+        where the layer is pickled to each worker process; dropping the undo
+        stack keeps the payload small and independent of later interactive edits."""
+        c = EditLayer(self.w, self.h)
+        c.rgb = self.rgb.copy()
+        c.rgb_mask = self.rgb_mask.copy()
+        c.alpha = self.alpha.copy()
+        c.alpha_mask = self.alpha_mask.copy()
+        c._version = self._version
+        return c
+
     @staticmethod
     def sidecar_path(image_path) -> Path:
         p = Path(image_path)

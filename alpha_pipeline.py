@@ -2291,6 +2291,12 @@ def _manual_edit_region(params: dict):
     return (params.get("_roi_ctx") or {}).get("manual_src_region")
 
 
+def _manual_edit_fit(params: dict) -> str:
+    """'scale' for interactive (whole/preview/ROI); 'place' for batch (fixed
+    x,y, no scaling, clipped)."""
+    return str(params.get("_manual_edits_fit", "scale"))
+
+
 def _stage_manual_alpha(work_alpha: Image.Image, params: dict) -> Image.Image:
     """Apply manual ALPHA edits — LATE: after snap/clamp/shape (so those can't
     destroy the painted values), before compose (so post-processing applies)."""
@@ -2299,7 +2305,8 @@ def _stage_manual_alpha(work_alpha: Image.Image, params: dict) -> Image.Image:
         return work_alpha
     import manual_edits
     return manual_edits.apply_alpha(work_alpha, layer,
-                                    region=_manual_edit_region(params))
+                                    region=_manual_edit_region(params),
+                                    fit=_manual_edit_fit(params))
 
 
 def _stage_manual_rgb(rgb: Image.Image, params: dict) -> Image.Image:
@@ -2309,7 +2316,9 @@ def _stage_manual_rgb(rgb: Image.Image, params: dict) -> Image.Image:
     if layer is None:
         return rgb
     import manual_edits
-    return manual_edits.apply_rgb(rgb, layer, region=_manual_edit_region(params))
+    return manual_edits.apply_rgb(rgb, layer,
+                                  region=_manual_edit_region(params),
+                                  fit=_manual_edit_fit(params))
 
 
 def _stage_tone(rgb: Image.Image, params: dict) -> Image.Image:

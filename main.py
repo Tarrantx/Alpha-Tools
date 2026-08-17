@@ -4651,6 +4651,18 @@ class BatchTab(ctk.CTkFrame):
                  "When unticked, existing files are overwritten; if any already "
                  "exist you'll be asked to confirm before the batch starts.")
 
+        self.include_edits_var = tk.BooleanVar(value=False)
+        edits_cb = ctk.CTkCheckBox(
+            row, text="Include manual edits (from the Tune tab)",
+            variable=self.include_edits_var,
+        )
+        edits_cb.grid(row=3, column=1, columnspan=4, sticky="w", padx=6, pady=(4, 0))
+        _Tooltip(edits_cb,
+                 "Apply the manual pixel edits currently painted on the Tune tab "
+                 "to every file, at the SAME x,y coordinates (no scaling). For "
+                 "batches of same-size images. Load an image on the Tune tab and "
+                 "paint first; leave off to ignore manual edits.")
+
         self.output_format_var = tk.StringVar(value=OUTPUT_FORMATS[0])
         ctk.CTkLabel(row, text="Format:", anchor="w"
                      ).grid(row=0, column=4, padx=(20, 4))
@@ -4978,6 +4990,23 @@ class BatchTab(ctk.CTkFrame):
         else:
             params_snapshot["colourmatch_enabled"] = False
 
+        # Manual edits: apply the Tune tab's painted layer to every file at fixed
+        # x,y (flatten() drops the undo history for a smaller per-worker pickle).
+        if self.include_edits_var.get():
+            layer = self.params.get("_manual_edits")
+            if layer is None or layer.is_empty():
+                messagebox.showerror(
+                    "Batch", "“Include manual edits” is on, but there are no "
+                    "manual edits. Load an image on the Tune tab and paint first.")
+                return
+            params_snapshot["_manual_edits"] = layer.flatten()
+            params_snapshot["_manual_edits_fit"] = "place"
+            self._log("Manual edits ON: applying at fixed x,y (same-size images "
+                      "assumed; out-of-bounds is clipped).")
+        else:
+            params_snapshot.pop("_manual_edits", None)
+            params_snapshot.pop("_manual_edits_fit", None)
+
         autopick = bool(self.autopick_var.get())
         self._stop_flag.clear()
         self.run_btn.configure(state="disabled")
@@ -5045,6 +5074,15 @@ class BatchTab(ctk.CTkFrame):
                         **file_params,
                         **{k: v for k, v in params.items()
                            if k.startswith("colourmatch_")},
+                    }
+
+                # Manual edits are batch-wide too; merge them in (auto-pick
+                # presets lack these keys), so every file gets the same layer.
+                if params.get("_manual_edits") is not None:
+                    file_params = {
+                        **file_params,
+                        "_manual_edits": params["_manual_edits"],
+                        "_manual_edits_fit": params.get("_manual_edits_fit", "place"),
                     }
 
                 if dst.suffix.lower() == ".dds":
