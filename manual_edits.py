@@ -1,0 +1,247 @@
+"""Manual per-pixel touch-up edit layer for Alpha Tools.
+
+A SOURCE-resolution overlay the user paints in the preview to fix pixels that no
+setting can. Two independent channels, applied at different points in the
+pipeline (see alpha_pipeline.process_pil):
+
+  * RGB edits   (rgb + rgb_mask)   applied EARLY  — before tone, so tone /
+    perceptual / FX / quantise reprocess them and keep them colour-consistent.
+  * alpha edits (alpha + alpha_mask) applied LATE — after snap / clamp / shape
+    (so those can't destroy the painted values) but before compose, so the rest
+    of post-processing still applies.
+
+Brush size and coordinates are in SOURCE pixels, so edits are zoom / pan /
+resolution invariant and land identically on the full-res save and in batch.
+The pipeline stages resample the layer (nearest) to whatever resolution they run
+at: the full-res save (1:1, exact), the ~1024px live preview (downscaled), or a
+full-res ROI crop (a sliced region). Batch uses `fit="place"` — fixed x,y, no
+scaling, clipped to the target — per the same-size-images assumption.
+
+Undo is per-stroke: each stroke (press→drag→release) snapshots the prior state
+of every square it touches and can be reverted by replaying those snapshots in
+reverse. The sidecar (`*.edits.npz`) stores only the flattened layer, not the
+undo history.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+from PIL import Image
+
+MAX_UNDO = 24                       # stroke history depth
+CHANNELS = ("alpha", "rgb")
+MODES = ("paint", "erase")
+
+
+class EditLayer:
+    """Full-resolution manual edit layer for one source image."""
+
+    def __init__(self, width: int, height: int):
+        self.w = int(width)
+        self.h = int(height)
+        self.rgb = np.zeros((self.h, self.w, 3), np.uint8)
+        self.rgb_mask = np.zeros((self.h, self.w), bool)
+        self.alpha = np.zeros((self.h, self.w), np.uint8)
+        self.alpha_mask = np.zeros((self.h, self.w), bool)
+        self._version = 0                        # bumped on every committed change
+        self._undo: list = []                    # each: list of square snapshots
+        self._pending: Optional[list] = None     # snapshots for the active stroke
+
+    # -- state ---------------------------------------------------------------
+    def version(self) -> int:
+        return self._version
+
+    def has_rgb(self) -> bool:
+        return bool(self.rgb_mask.any())
+
+    def has_alpha(self) -> bool:
+        return bool(self.alpha_mask.any())
+
+    def is_empty(self) -> bool:
+        return not self.has_rgb() and not self.has_alpha()
+
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    # -- painting ------------------------------------------------------------
+    def begin_stroke(self):
+        """Start a stroke; snapshots accumulate until end_stroke()."""
+        self._pending = []
+
+    def apply_dab(self, cx: float, cy: float, size: int, channel: str,
+                  mode: str = "paint", alpha_value: int = 0,
+                  rgb_value=(0, 0, 0)):
+        """Paint (or erase) a square of `size` SOURCE px centred on (cx, cy).
+        No-op if the square falls entirely outside the image."""
+        if channel not in CHANNELS or mode not in MODES:
+            raise ValueError(f"bad channel/mode: {channel}/{mode}")
+        s = max(1, int(size))
+        half = s // 2
+        x0 = max(0, int(round(cx)) - half)
+        y0 = max(0, int(round(cy)) - half)
+        x1 = min(self.w, x0 + s)
+        y1 = min(self.h, y0 + s)
+        if x1 <= x0 or y1 <= y0:
+            return
+        standalone = self._pending is None       # allow a dab without begin/end
+        if standalone:
+            self._pending = []
+        self._snapshot(x0, y0, x1, y1)
+        if channel == "alpha":
+            if mode == "erase":
+                self.alpha_mask[y0:y1, x0:x1] = False
+            else:
+                self.alpha[y0:y1, x0:x1] = int(alpha_value) & 0xFF
+                self.alpha_mask[y0:y1, x0:x1] = True
+        else:                                     # rgb
+            if mode == "erase":
+                self.rgb_mask[y0:y1, x0:x1] = False
+            else:
+                self.rgb[y0:y1, x0:x1] = np.asarray(rgb_value, np.uint8)[:3]
+                self.rgb_mask[y0:y1, x0:x1] = True
+        if standalone:
+            self.end_stroke()
+
+    def end_stroke(self):
+        """Commit the active stroke to the undo history and bump the version."""
+        if not self._pending:
+            self._pending = None
+            return
+        self._undo.append(self._pending)
+        if len(self._undo) > MAX_UNDO:
+            self._undo.pop(0)
+        self._pending = None
+        self._version += 1
+
+    def _snapshot(self, x0, y0, x1, y1):
+        self._pending.append((
+            x0, y0, x1, y1,
+            self.rgb[y0:y1, x0:x1].copy(),
+            self.rgb_mask[y0:y1, x0:x1].copy(),
+            self.alpha[y0:y1, x0:x1].copy(),
+            self.alpha_mask[y0:y1, x0:x1].copy(),
+        ))
+
+    def undo(self) -> bool:
+        """Revert the most recent stroke. Returns False if nothing to undo."""
+        if not self._undo:
+            return False
+        # Replay the stroke's square snapshots in REVERSE so overlapping dabs
+        # restore correctly (the earliest snapshot holds the true prior value).
+        for x0, y0, x1, y1, rgb, rgbm, a, am in reversed(self._undo.pop()):
+            self.rgb[y0:y1, x0:x1] = rgb
+            self.rgb_mask[y0:y1, x0:x1] = rgbm
+            self.alpha[y0:y1, x0:x1] = a
+            self.alpha_mask[y0:y1, x0:x1] = am
+        self._version += 1
+        return True
+
+    def clear(self):
+        """Delete all manual edits (undoable as a single step)."""
+        if self.is_empty():
+            return
+        self.begin_stroke()
+        self._snapshot(0, 0, self.w, self.h)
+        self.rgb_mask[:] = False
+        self.alpha_mask[:] = False
+        self.end_stroke()
+
+    # -- rendering into the pipeline ----------------------------------------
+    def _render(self, channel: str, region, out_w: int, out_h: int, fit: str):
+        """Return (values, mask) for `channel` over source `region`, sized to
+        (out_w, out_h). `fit`: 'scale' resamples (nearest); 'place' pastes at
+        (0,0) clipped (no scaling). region=None means the whole layer."""
+        if channel == "rgb":
+            vals_src, mask_src = self.rgb, self.rgb_mask
+        else:
+            vals_src, mask_src = self.alpha, self.alpha_mask
+
+        if region is None:
+            x0, y0, x1, y1 = 0, 0, self.w, self.h
+        else:
+            x0 = max(0, min(self.w, int(region[0])))
+            y0 = max(0, min(self.h, int(region[1])))
+            x1 = max(0, min(self.w, int(region[2])))
+            y1 = max(0, min(self.h, int(region[3])))
+        if x1 <= x0 or y1 <= y0:
+            return None, None
+        vsub = vals_src[y0:y1, x0:x1]
+        msub = mask_src[y0:y1, x0:x1]
+
+        if fit == "place":
+            hh = min(out_h, vsub.shape[0])
+            ww = min(out_w, vsub.shape[1])
+            if channel == "rgb":
+                vals = np.zeros((out_h, out_w, 3), np.uint8)
+            else:
+                vals = np.zeros((out_h, out_w), np.uint8)
+            mask = np.zeros((out_h, out_w), bool)
+            vals[:hh, :ww] = vsub[:hh, :ww]
+            mask[:hh, :ww] = msub[:hh, :ww]
+            return vals, mask
+
+        # fit == "scale": exact when the region already matches the target.
+        if (x1 - x0) == out_w and (y1 - y0) == out_h:
+            return vsub.copy(), msub.copy()
+        size = (out_w, out_h)
+        N = Image.Resampling.NEAREST
+        if channel == "rgb":
+            vals = np.asarray(Image.fromarray(vsub, "RGB").resize(size, N))
+        else:
+            vals = np.asarray(Image.fromarray(vsub, "L").resize(size, N))
+        mask = np.asarray(
+            Image.fromarray((msub.astype(np.uint8) * 255), "L").resize(size, N)
+        ) > 127
+        return vals, mask
+
+    # -- persistence (sidecar) ----------------------------------------------
+    def save(self, path):
+        np.savez_compressed(
+            str(path), w=self.w, h=self.h, rgb=self.rgb, rgb_mask=self.rgb_mask,
+            alpha=self.alpha, alpha_mask=self.alpha_mask)
+
+    @classmethod
+    def load(cls, path) -> "EditLayer":
+        with np.load(str(path)) as z:
+            layer = cls(int(z["w"]), int(z["h"]))
+            layer.rgb = z["rgb"]
+            layer.rgb_mask = z["rgb_mask"]
+            layer.alpha = z["alpha"]
+            layer.alpha_mask = z["alpha_mask"]
+        return layer
+
+    @staticmethod
+    def sidecar_path(image_path) -> Path:
+        p = Path(image_path)
+        return p.with_suffix(p.suffix + ".edits.npz")
+
+
+# -- pipeline entry points (called by alpha_pipeline stages) -----------------
+def apply_rgb(rgb_pil: Image.Image, layer: Optional[EditLayer],
+              region=None, fit: str = "scale") -> Image.Image:
+    """Return `rgb_pil` (RGB) with the layer's RGB edits composited in."""
+    if layer is None or not layer.has_rgb():
+        return rgb_pil
+    W, H = rgb_pil.size
+    vals, mask = layer._render("rgb", region, W, H, fit)
+    if mask is None or not mask.any():
+        return rgb_pil
+    arr = np.array(rgb_pil.convert("RGB"), np.uint8)
+    arr[mask] = vals[mask]
+    return Image.fromarray(arr, "RGB")
+
+
+def apply_alpha(alpha_pil: Image.Image, layer: Optional[EditLayer],
+                region=None, fit: str = "scale") -> Image.Image:
+    """Return `alpha_pil` (L) with the layer's alpha edits composited in."""
+    if layer is None or not layer.has_alpha():
+        return alpha_pil
+    W, H = alpha_pil.size
+    vals, mask = layer._render("alpha", region, W, H, fit)
+    if mask is None or not mask.any():
+        return alpha_pil
+    arr = np.array(alpha_pil.convert("L"), np.uint8)
+    arr[mask] = vals[mask]
+    return Image.fromarray(arr, "L")

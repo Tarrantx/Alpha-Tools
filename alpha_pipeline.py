@@ -2286,6 +2286,32 @@ def _stage_rgb_dilate(rgb_base: Image.Image, work_alpha: Image.Image,
     return rgb_base
 
 
+def _manual_edit_region(params: dict):
+    """Source rect the working image covers, for ROI crops (None = whole)."""
+    return (params.get("_roi_ctx") or {}).get("manual_src_region")
+
+
+def _stage_manual_alpha(work_alpha: Image.Image, params: dict) -> Image.Image:
+    """Apply manual ALPHA edits — LATE: after snap/clamp/shape (so those can't
+    destroy the painted values), before compose (so post-processing applies)."""
+    layer = params.get("_manual_edits")
+    if layer is None:
+        return work_alpha
+    import manual_edits
+    return manual_edits.apply_alpha(work_alpha, layer,
+                                    region=_manual_edit_region(params))
+
+
+def _stage_manual_rgb(rgb: Image.Image, params: dict) -> Image.Image:
+    """Apply manual RGB edits — EARLY: before tone, so tone/perceptual/FX/
+    quantise reprocess them and keep them colour-consistent."""
+    layer = params.get("_manual_edits")
+    if layer is None:
+        return rgb
+    import manual_edits
+    return manual_edits.apply_rgb(rgb, layer, region=_manual_edit_region(params))
+
+
 def _stage_tone(rgb: Image.Image, params: dict) -> Image.Image:
     out = adjust_intensity(
         rgb, params["saturation"], params["contrast"], params["brightness"],
@@ -2482,7 +2508,9 @@ def process_pil(img: Image.Image,
         work_alpha = _stage_snap(work_alpha, params)
         work_alpha = _stage_clamp(work_alpha, params)
         work_alpha = _stage_alpha_shape(work_alpha, params)
+        work_alpha = _stage_manual_alpha(work_alpha, params)
         rgb = _stage_rgb_dilate(rgb_base, work_alpha, params)
+        rgb = _stage_manual_rgb(rgb, params)
         rgb = _stage_tone(rgb, params)
         rgb = _stage_perceptual(rgb, params)
         rgb = _stage_premultiply(rgb, work_alpha, params)
@@ -2633,6 +2661,11 @@ def process_crop(full_img: Image.Image, params: dict, rect,
         ey0 -= ey0 % align
 
     crop = full_img.crop((ex0, ey0, ex1, ey1))
+    # Tell the manual-edit stages which SOURCE region this crop covers, so they
+    # slice the (source-resolution) edit layer to match instead of stretching
+    # the whole layer onto the crop.
+    ctx = dict(ctx or {})
+    ctx["manual_src_region"] = (ex0, ey0, ex1, ey1)
     res = process_pil(crop, params, ctx=ctx)
     if res.mode != "RGBA":
         res = res.convert("RGBA")
@@ -2806,11 +2839,29 @@ class PreviewPipeline:
         def r_shape(s, p, tmp):
             s.work_alpha = _stage_alpha_shape(s.work_alpha, p)
 
+        def k_manual_alpha(p, t):
+            layer = p.get("_manual_edits")
+            if layer is None or not layer.has_alpha():
+                return (False,)
+            return ("a", layer.version())
+
+        def r_manual_alpha(s, p, tmp):
+            s.work_alpha = _stage_manual_alpha(s.work_alpha, p)
+
         def k_rgbdil(p, t):
             return (p["edge_dilation"], p["edge_dilation_threshold"])
 
         def r_rgbdil(s, p, tmp):
             s.rgb = _stage_rgb_dilate(s.rgb_base, s.work_alpha, p)
+
+        def k_manual_rgb(p, t):
+            layer = p.get("_manual_edits")
+            if layer is None or not layer.has_rgb():
+                return (False,)
+            return ("r", layer.version())
+
+        def r_manual_rgb(s, p, tmp):
+            s.rgb = _stage_manual_rgb(s.rgb, p)
 
         def k_tone(p, t):
             return (p["saturation"], p["contrast"], p["brightness"],
@@ -2888,7 +2939,9 @@ class PreviewPipeline:
             (k_load, r_load), (k_build, r_build), (k_incong, r_incong),
             (k_refine, r_refine),
             (k_snap, r_snap), (k_clamp, r_clamp), (k_shape, r_shape),
-            (k_rgbdil, r_rgbdil), (k_tone, r_tone),
+            (k_manual_alpha, r_manual_alpha),
+            (k_rgbdil, r_rgbdil), (k_manual_rgb, r_manual_rgb),
+            (k_tone, r_tone),
             (k_perceptual, r_perceptual), (k_premult, r_premult),
             (k_compose, r_compose), (k_pix, r_pix), (k_soften, r_soften),
             (k_fx, r_fx), (k_colourmatch, r_colourmatch),
