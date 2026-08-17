@@ -1161,6 +1161,11 @@ class ZoomPanPreview(ctk.CTkFrame):
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        # Right-drag ALWAYS pans (right button is otherwise unused), so that
+        # once manual-edit mode makes left-drag paint, panning stays available.
+        self.canvas.bind("<ButtonPress-3>", self._on_press)
+        self.canvas.bind("<B3-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-3>", self._on_release)
         self.canvas.bind("<Configure>", self._on_resize)
         self.canvas.bind("<MouseWheel>", self._on_wheel)
         self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
@@ -3580,6 +3585,7 @@ class TuneTab(ctk.CTkFrame):
         super().__init__(parent, **kwargs)
         self.params = params
         self.source_image: Image.Image | None = None       # full-res RGBA
+        self.source_path: str | None = None                # path it was loaded from
         self.preview_source: Image.Image | None = None     # downscaled RGBA
         self.last_after: Image.Image | None = None
 
@@ -3787,6 +3793,7 @@ class TuneTab(ctk.CTkFrame):
             messagebox.showerror("Load failed", f"Couldn't open image:\n{e}")
             return
         self.source_image = img
+        self.source_path = path
         self.preview_source = self._make_preview_source(img)
         self._redraw_previews()
         self._schedule_preview()
@@ -3803,9 +3810,15 @@ class TuneTab(ctk.CTkFrame):
         # the user picked, so two DDS entries (DXT1/DXT5) couldn't be told
         # apart. The compression is chosen explicitly below once the path is
         # known to be .dds.
+        # Default the filename to the loaded image's name (stem only, so the
+        # user still picks the output format via the dialog's type filter).
+        initialfile = ""
+        if self.source_path:
+            initialfile = Path(self.source_path).stem
         path = filedialog.asksaveasfilename(
             title="Save cleaned texture",
             initialdir=load_dialog_dir("save_image"),
+            initialfile=initialfile,
             defaultextension=".png",
             filetypes=[("PNG", "*.png"), ("TIFF", "*.tif;*.tiff"),
                        ("WebP", "*.webp"),
