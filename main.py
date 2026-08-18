@@ -3709,7 +3709,8 @@ class ManualEditsPanel(ctk.CTkFrame):
     source of truth for the tool / brush / values; it pushes them onto the
     TuneTab's per-image EditController. Editing itself is gated by the view mode
     (exactly one of show-alpha-only / show-texture-only)."""
-    _TOOL_MAP = {"Pencil": "pencil", "Eraser": "eraser", "Picker": "picker"}
+    _TOOL_MAP = {"Pencil": "pencil", "Eraser": "eraser", "Picker": "picker",
+                 "Granulate": "granulate"}
 
     def __init__(self, parent, tune, **kwargs):
         super().__init__(parent, **kwargs)
@@ -3747,7 +3748,7 @@ class ManualEditsPanel(ctk.CTkFrame):
 
         self._tool_var = tk.StringVar(value="Pencil")
         self._tools = ctk.CTkSegmentedButton(
-            self, values=["Pencil", "Eraser", "Picker"],
+            self, values=["Pencil", "Eraser", "Picker", "Granulate"],
             variable=self._tool_var, command=lambda _v: self._push())
         self._tools.pack(fill="x", padx=6, pady=2)
 
@@ -3781,6 +3782,17 @@ class ManualEditsPanel(ctk.CTkFrame):
             hover_color=self._rgb_hex, command=self._pick_colour)
         self._colour_btn.pack(side="left", padx=6)
 
+        # Granulate variation (max per-channel jitter around the source colour).
+        v_row = ctk.CTkFrame(self, fg_color="transparent")
+        v_row.pack(fill="x", padx=6, pady=2)
+        ctk.CTkLabel(v_row, text="Variation:", anchor="w", width=58).pack(side="left")
+        self._gran_var = tk.IntVar(value=12)
+        ctk.CTkLabel(v_row, textvariable=self._gran_var, width=34).pack(side="right")
+        self._gran_slider = ctk.CTkSlider(v_row, from_=0, to=64,
+                                          number_of_steps=64, command=self._on_gran)
+        self._gran_slider.set(12)
+        self._gran_slider.pack(side="left", fill="x", expand=True, padx=6)
+
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=6, pady=(6, 2))
         ctk.CTkButton(btn_row, text="Save edits…", width=100,
@@ -3803,6 +3815,10 @@ class ManualEditsPanel(ctk.CTkFrame):
         self._alpha_var.set(int(round(float(v))))
         self._push()
 
+    def _on_gran(self, v):
+        self._gran_var.set(int(round(float(v))))
+        self._push()
+
     def _pick_colour(self):
         from tkinter import colorchooser
         r = colorchooser.askcolor(color=self._rgb_hex, title="Edit colour", parent=self)
@@ -3816,11 +3832,15 @@ class ManualEditsPanel(ctk.CTkFrame):
         e = self.tune.edit
         if e is None:
             return
+        tool = self._TOOL_MAP.get(self._tool_var.get(), "pencil")
+        if tool == "granulate":
+            self._chan_var.set("RGB")          # granulate is RGB-only
         e.channel = "alpha" if self._chan_var.get() == "Alpha" else "rgb"
-        e.tool = self._TOOL_MAP.get(self._tool_var.get(), "pencil")
+        e.tool = tool
         e.brush = int(self._size_var.get())
         e.alpha_value = int(self._alpha_var.get())
         e.rgb_value = _hex_to_rgb(self._rgb_hex)
+        e.granulate_amount = int(self._gran_var.get())
         self.tune._update_edit_mode()          # refresh brush-cursor size + gating
 
     def sync_to_controller(self):
@@ -3851,15 +3871,22 @@ class ManualEditsPanel(ctk.CTkFrame):
                 w.configure(state="normal" if on else "disabled")
             except Exception:
                 pass
+        is_gran = self._TOOL_MAP.get(self._tool_var.get()) == "granulate"
         _cfg(self._enable_cb, image_loaded)
-        for w in (self._chan, self._tools, self._size_minus, self._size_plus):
+        for w in (self._tools, self._size_minus, self._size_plus):
             _cfg(w, active)
-        _cfg(self._alpha_slider, active and channel == "alpha")
-        _cfg(self._colour_btn, active and channel == "rgb")
+        _cfg(self._chan, active and not is_gran)        # granulate locks to RGB
+        _cfg(self._alpha_slider, active and channel == "alpha" and not is_gran)
+        _cfg(self._colour_btn, active and channel == "rgb" and not is_gran)
+        _cfg(self._gran_slider, active and is_gran)
         if not image_loaded:
             self._hint.configure(text="Load an image to paint.")
         elif not active:
             self._hint.configure(text="Tick “Enable editing” to paint.")
+        elif is_gran:
+            self._hint.configure(
+                text="Granulate — brush over flat areas to speckle the underlying "
+                     "colour; Variation sets the amount. Ctrl+Z undo.")
         else:
             ch = "Alpha" if channel == "alpha" else "RGB colour"
             self._hint.configure(
@@ -4349,6 +4376,8 @@ class TuneTab(ctk.CTkFrame):
                 except Exception:
                     pass
         self.edit = manual_edits.EditController(layer, on_change=self._on_edit_change)
+        # Source RGB is what the Granulate tool jitters around (the flat colour).
+        self.edit.source_rgb = np.asarray(self.source_image.convert("RGB"), np.uint8)
         self.params["_manual_edits"] = layer
         self._edit_enabled = False                 # editing starts off per image
         if hasattr(self, "manual_edits_panel"):

@@ -227,6 +227,37 @@ class EditLayer:
         c._version = self._version
         return c
 
+    def apply_granulate_dab(self, cx, cy, size: int, base_rgb, amount: int):
+        """Paint a square of per-pixel colour JITTER around the underlying
+        source colour — breaks flat upscale banding into subtle speckle. Writes
+        the RGB channel. `base_rgb` = source RGB (HxWx3 uint8, layer-sized);
+        `amount` = max per-channel jitter (0 = paint the source colour flat)."""
+        if base_rgb is None:
+            return
+        amount = max(0, int(amount))
+        s = max(1, int(size))
+        half = s // 2
+        x0 = max(0, int(round(cx)) - half)
+        y0 = max(0, int(round(cy)) - half)
+        x1 = min(self.w, x0 + s)
+        y1 = min(self.h, y0 + s)
+        if x1 <= x0 or y1 <= y0:
+            return
+        standalone = self._pending is None
+        if standalone:
+            self._pending = []
+        self._snapshot(x0, y0, x1, y1)
+        sub = base_rgb[y0:y1, x0:x1, :3].astype(np.int16)
+        if amount > 0:
+            noise = np.random.randint(-amount, amount + 1, size=sub.shape,
+                                      dtype=np.int16)
+            sub = np.clip(sub + noise, 0, 255)
+        self.rgb[y0:y1, x0:x1] = sub.astype(np.uint8)
+        self.rgb_mask[y0:y1, x0:x1] = True
+        self._version += 1
+        if standalone:
+            self.end_stroke()
+
     def placed_into(self, w: int, h: int) -> "EditLayer":
         """A copy of this layer sized (w, h): identical when the size matches,
         otherwise pasted at (0,0) and clipped (fixed x,y). Used when loading a
@@ -283,7 +314,7 @@ class EditController:
     brush size and values. Interpolates dabs along a drag so fast strokes leave
     no gaps. `on_change` fires after any layer mutation (to refresh the preview).
     """
-    TOOLS = ("pencil", "eraser", "picker")
+    TOOLS = ("pencil", "eraser", "picker", "granulate")
 
     def __init__(self, layer: EditLayer, on_change=None):
         self.layer = layer
@@ -292,11 +323,17 @@ class EditController:
         self.brush = 4                         # source px
         self.alpha_value = 255
         self.rgb_value = (255, 0, 0)
+        self.granulate_amount = 12             # max per-channel jitter (granulate)
+        self.source_rgb = None                 # HxWx3 uint8 base for granulate
         self.on_change = on_change
         self._last = None
         self._stroking = False
 
     def _dab(self, sx, sy):
+        if self.tool == "granulate":
+            self.layer.apply_granulate_dab(sx, sy, self.brush, self.source_rgb,
+                                           self.granulate_amount)
+            return
         mode = "erase" if self.tool == "eraser" else "paint"
         self.layer.apply_dab(sx, sy, self.brush, self.channel, mode,
                              alpha_value=self.alpha_value, rgb_value=self.rgb_value)

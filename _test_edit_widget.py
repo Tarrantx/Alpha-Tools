@@ -238,6 +238,43 @@ def test_load_edits_onto_new_image():
         _teardown(app)
 
 
+def test_granulate_tool_via_panel():
+    """Selecting Granulate locks the channel to RGB, enables the Variation
+    slider, and painting speckles the source colour. Skipped if no display."""
+    try:
+        import numpy as _np
+        import customtkinter as ctk
+        import main
+        from PIL import Image
+        app = main.AlphaToolsApp(); app.withdraw(); app.update_idletasks()
+    except Exception as e:
+        print("SKIP granulate tool (no GUI):", e)
+        return
+    try:
+        t = app.tune
+        p = t.manual_edits_panel
+        t.source_image = Image.new("RGBA", (80, 80), (100, 100, 100, 255))
+        t.source_path = None
+        t.preview_source = t._make_preview_source(t.source_image)
+        t._init_edit_layer()
+        assert t.edit.source_rgb is not None            # base for jitter
+        t._set_edit_enabled(True)
+        p._tool_var.set("Granulate"); p._push()
+        assert t.edit.tool == "granulate" and t.edit.channel == "rgb"
+        assert p._chan_var.get() == "RGB"               # channel locked to RGB
+        assert str(p._gran_slider.cget("state")) == "normal"
+        p._gran_var.set(20); p._on_gran(20)
+        assert t.edit.granulate_amount == 20
+        t.edit.brush = 10
+        t._edit_begin(40, 40); t._edit_end()
+        reg = t.edit.layer.rgb[36:44, 36:44]
+        assert t.edit.layer.rgb_mask[40, 40]            # painted
+        assert reg.std() > 0                            # speckled, not flat
+        assert int(reg.min()) >= 80 and int(reg.max()) <= 120   # around 100 +/-20
+    finally:
+        _teardown(app)
+
+
 def test_ctrl_zoom_center():
     """Ctrl +/- zoom about the viewport centre: a centred image stays centred;
     a panned view scales its offset so the centre is stable; mirrors to the
@@ -380,7 +417,7 @@ _GUI_TESTS = {
     "test_widget_paint_and_pan", "test_app_integration",
     "test_alpha_edit_in_texture_view", "test_ctrl_click_picks",
     "test_panel_integration", "test_load_edits_onto_new_image",
-    "test_ctrl_zoom_center",
+    "test_ctrl_zoom_center", "test_granulate_tool_via_panel",
 }
 
 if __name__ == "__main__":

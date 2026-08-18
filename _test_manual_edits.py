@@ -104,6 +104,44 @@ def test_apply_region_crop_exact():
     assert out[8, 8] == 55 and out[0, 0] == 255
 
 
+def test_granulate_dab():
+    """Granulate paints per-pixel jitter around the source colour: RGB channel,
+    bounded by +/-amount, actual variation, and re-applies deterministically
+    once stored (a stored dab keeps its exact values)."""
+    L = me.EditLayer(40, 40)
+    base = np.full((40, 40, 3), 100, np.uint8)       # flat colour
+    L.begin_stroke(); L.apply_granulate_dab(20, 20, 10, base, amount=15); L.end_stroke()
+    reg = L.rgb[16:24, 16:24]
+    assert L.rgb_mask[16:24, 16:24].all() and not L.has_alpha()
+    assert int(reg.min()) >= 85 and int(reg.max()) <= 115   # within +-15 of 100
+    assert reg.std() > 0                              # actually speckled
+    # Stored values are fixed (batch/replay is deterministic).
+    snapshot = L.rgb[16:24, 16:24].copy()
+    assert np.array_equal(L.rgb[16:24, 16:24], snapshot)
+
+
+def test_granulate_amount_zero_is_flat():
+    L = me.EditLayer(30, 30)
+    base = np.full((30, 30, 3), 70, np.uint8)
+    L.apply_granulate_dab(15, 15, 8, base, amount=0)  # no variation -> source colour
+    assert (L.rgb[15, 15] == 70).all() and L.rgb_mask[15, 15]
+
+
+def test_controller_granulate_needs_source():
+    # No source_rgb -> no-op; with source -> paints jittered RGB.
+    c0 = me.EditController(me.EditLayer(20, 20))
+    c0.tool = "granulate"; c0.brush = 6
+    c0.begin(10, 10); c0.end()
+    assert c0.layer.is_empty()
+    c = me.EditController(me.EditLayer(40, 40))
+    c.tool = "granulate"; c.brush = 8; c.granulate_amount = 10
+    c.source_rgb = np.full((40, 40, 3), 80, np.uint8)
+    c.begin(20, 20); c.end()
+    assert c.layer.has_rgb()
+    v = c.layer.rgb[20, 20]
+    assert 70 <= int(v.min()) and int(v.max()) <= 90
+
+
 def test_placed_into():
     """placed_into: same size = verbatim (no undo); different size = fixed x,y,
     clipped — used to load edits onto a new image."""
