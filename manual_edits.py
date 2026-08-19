@@ -328,10 +328,22 @@ class EditController:
         self.on_change = on_change
         self._last = None
         self._stroking = False
+        self._gran_base = None                 # frozen effective RGB for a stroke
+
+    def _effective_rgb(self):
+        """Source RGB with the current manual RGB edits composited in — the base
+        the Granulate tool jitters around, so it BUILDS ON pencil edits instead
+        of erasing them back to the source colour."""
+        if self.source_rgb is None:
+            return None
+        m = self.layer.rgb_mask
+        if not m.any():
+            return self.source_rgb             # no edits yet: source as-is
+        return np.where(m[..., None], self.layer.rgb, self.source_rgb)
 
     def _dab(self, sx, sy):
         if self.tool == "granulate":
-            self.layer.apply_granulate_dab(sx, sy, self.brush, self.source_rgb,
+            self.layer.apply_granulate_dab(sx, sy, self.brush, self._gran_base,
                                            self.granulate_amount)
             return
         mode = "erase" if self.tool == "eraser" else "paint"
@@ -342,6 +354,10 @@ class EditController:
         """Begin a paint/erase stroke. No-op for the picker (handled upstream)."""
         if self.tool == "picker":
             return
+        if self.tool == "granulate":
+            # Freeze the base once per stroke (source + existing edits) so a
+            # stroke can't compound its own jitter and pencil edits survive.
+            self._gran_base = self._effective_rgb()
         self.layer.begin_stroke()
         self._stroking = True
         self._last = (sx, sy)
@@ -363,6 +379,7 @@ class EditController:
         if not self._stroking:
             return
         self.layer.end_stroke()
+        self._gran_base = None
         self._stroking = False
         self._last = None
         self._changed()

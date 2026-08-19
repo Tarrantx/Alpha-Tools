@@ -127,6 +127,22 @@ def test_granulate_amount_zero_is_flat():
     assert (L.rgb[15, 15] == 70).all() and L.rgb_mask[15, 15]
 
 
+def test_granulate_builds_on_pencil():
+    """Granulate must jitter around an existing pencil edit, not erase it back
+    to the source colour."""
+    L = me.EditLayer(40, 40)
+    c = me.EditController(L)
+    c.source_rgb = np.full((40, 40, 3), 50, np.uint8)      # dark source
+    c.tool = "pencil"; c.channel = "rgb"; c.brush = 10; c.rgb_value = (200, 40, 40)
+    c.begin(20, 20); c.end()
+    assert tuple(L.rgb[20, 20]) == (200, 40, 40)
+    c.tool = "granulate"; c.brush = 10; c.granulate_amount = 8
+    c.begin(20, 20); c.end()
+    v = L.rgb[20, 20]
+    assert 192 <= int(v[0]) <= 208            # around the pencil 200, not source 50
+    assert int(v[1]) <= 50 and int(v[2]) <= 50
+
+
 def test_controller_granulate_needs_source():
     # No source_rgb -> no-op; with source -> paints jittered RGB.
     c0 = me.EditController(me.EditLayer(20, 20))
