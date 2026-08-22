@@ -275,6 +275,69 @@ def test_granulate_tool_via_panel():
         _teardown(app)
 
 
+def test_panel_hidden_until_enabled():
+    """The tool controls box is hidden until 'Enable editing' is ticked."""
+    try:
+        import customtkinter as ctk
+        import main
+        from PIL import Image
+        app = main.AlphaToolsApp(); app.withdraw(); app.update_idletasks()
+    except Exception as e:
+        print("SKIP panel-hidden (no GUI):", e)
+        return
+    try:
+        t = app.tune
+        p = t.manual_edits_panel
+        t.source_image = Image.new("RGBA", (80, 80), (100, 100, 100, 255))
+        t.source_path = None
+        t.preview_source = t._make_preview_source(t.source_image)
+        t._init_edit_layer()
+        assert p._tool_box.winfo_manager() == "", "options shown before enabling"
+        t._set_edit_enabled(True)
+        assert p._tool_box.winfo_manager() == "pack", "options hidden after enabling"
+        t._set_edit_enabled(False)
+        assert p._tool_box.winfo_manager() == "", "options not re-hidden"
+    finally:
+        _teardown(app)
+
+
+def test_smudge_tool_via_panel():
+    """Selecting Smudge locks the channel to RGB, enables Strength, and dragging
+    blends colours. Skipped if no display."""
+    try:
+        import numpy as _np
+        import customtkinter as ctk
+        import main
+        from PIL import Image
+        app = main.AlphaToolsApp(); app.withdraw(); app.update_idletasks()
+    except Exception as e:
+        print("SKIP smudge tool (no GUI):", e)
+        return
+    try:
+        t = app.tune
+        p = t.manual_edits_panel
+        arr = _np.zeros((60, 60, 4), _np.uint8); arr[..., 3] = 255
+        arr[:, :30, 0] = 200            # left red
+        arr[:, 30:, 2] = 200            # right blue
+        t.source_image = Image.fromarray(arr, "RGBA")
+        t.source_path = None
+        t.preview_source = t._make_preview_source(t.source_image)
+        t._init_edit_layer()
+        t._set_edit_enabled(True)
+        p._tool_var.set("Smudge"); p._push()
+        assert t.edit.tool == "smudge" and t.edit.channel == "rgb"
+        assert p._chan_var.get() == "RGB"
+        assert str(p._strength_slider.cget("state")) == "normal"
+        p._strength_var.set(80); p._on_strength(80)
+        assert abs(t.edit.smudge_strength - 0.8) < 1e-6
+        t.edit.brush = 8
+        t._edit_begin(8, 30); t._edit_to(50, 30); t._edit_end()
+        px = t.edit.layer.rgb[30, 40]        # blue side near the drag path
+        assert t.edit.layer.rgb_mask[30, 40] and int(px[0]) > 20
+    finally:
+        _teardown(app)
+
+
 def test_ctrl_zoom_center():
     """Ctrl +/- zoom about the viewport centre: a centred image stays centred;
     a panned view scales its offset so the centre is stable; mirrors to the
@@ -418,6 +481,7 @@ _GUI_TESTS = {
     "test_alpha_edit_in_texture_view", "test_ctrl_click_picks",
     "test_panel_integration", "test_load_edits_onto_new_image",
     "test_ctrl_zoom_center", "test_granulate_tool_via_panel",
+    "test_panel_hidden_until_enabled", "test_smudge_tool_via_panel",
 }
 
 if __name__ == "__main__":

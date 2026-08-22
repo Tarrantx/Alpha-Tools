@@ -127,6 +127,42 @@ def test_granulate_amount_zero_is_flat():
     assert (L.rgb[15, 15] == 70).all() and L.rgb_mask[15, 15]
 
 
+def test_smudge_blends_colours():
+    """Dragging Smudge from a red area into a blue area pulls red into the blue
+    (colours blend), and marks the touched pixels as edits."""
+    L = me.EditLayer(40, 40)
+    c = me.EditController(L)
+    src = np.zeros((40, 40, 3), np.uint8)
+    src[:, :20] = (200, 0, 0)          # left half red
+    src[:, 20:] = (0, 0, 200)          # right half blue
+    c.source_rgb = src
+    c.source_alpha = np.full((40, 40), 255, np.uint8)
+    c.tool = "smudge"; c.brush = 8; c.smudge_strength = 0.8
+    c.begin(6, 20); c.to(34, 20); c.end()          # drag red -> blue
+    px = L.rgb[20, 28]                              # a blue-region pixel near path
+    assert L.rgb_mask[20, 28]
+    assert int(px[0]) > 20, f"red didn't bleed into blue: {tuple(int(x) for x in px)}"
+
+
+def test_smudge_gated_by_alpha():
+    """Smudge must not smear into fully-transparent areas."""
+    L = me.EditLayer(40, 40)
+    c = me.EditController(L)
+    src = np.zeros((40, 40, 3), np.uint8); src[:] = (200, 0, 0)
+    a = np.full((40, 40), 255, np.uint8); a[:, 20:] = 0     # right half transparent
+    c.source_rgb = src; c.source_alpha = a
+    c.tool = "smudge"; c.brush = 8; c.smudge_strength = 0.8
+    c.begin(6, 20); c.to(34, 20); c.end()
+    assert not L.rgb_mask[20, 34]                  # transparent area left untouched
+
+
+def test_smudge_needs_source():
+    c = me.EditController(me.EditLayer(20, 20))
+    c.tool = "smudge"; c.brush = 6
+    c.begin(10, 10); c.to(14, 10); c.end()
+    assert c.layer.is_empty()                      # no source -> no-op
+
+
 def test_granulate_builds_on_pencil():
     """Granulate must jitter around an existing pencil edit, not erase it back
     to the source colour."""

@@ -3714,7 +3714,8 @@ class ManualEditsPanel(ctk.CTkFrame):
     TuneTab's per-image EditController. Editing itself is gated by the view mode
     (exactly one of show-alpha-only / show-texture-only)."""
     _TOOL_MAP = {"Pencil": "pencil", "Eraser": "eraser", "Picker": "picker",
-                 "Granulate": "granulate"}
+                 "Granulate": "granulate", "Smudge": "smudge"}
+    _RGB_ONLY_TOOLS = {"granulate", "smudge"}
 
     def __init__(self, parent, tune, **kwargs):
         super().__init__(parent, **kwargs)
@@ -3738,10 +3739,15 @@ class ManualEditsPanel(ctk.CTkFrame):
             font=ctk.CTkFont(size=11), text_color=("#666", "#aaa"))
         self._hint.pack(fill="x", padx=6, pady=(0, 4))
 
+        # All the tool controls live in a box that's only shown once editing is
+        # enabled (like the vtracer pre-stage), to keep the panel uncluttered.
+        box = ctk.CTkFrame(self, fg_color="transparent")
+        self._tool_box = box            # NB: not "_options" — tkinter reserves that
+
         # Channel is chosen explicitly (not derived from the view mode) so you
         # can paint alpha while looking at the texture — easiest for spotting
         # where full transparency belongs.
-        ch_row = ctk.CTkFrame(self, fg_color="transparent")
+        ch_row = ctk.CTkFrame(box, fg_color="transparent")
         ch_row.pack(fill="x", padx=6, pady=2)
         ctk.CTkLabel(ch_row, text="Channel:", anchor="w", width=58).pack(side="left")
         self._chan_var = tk.StringVar(value="Alpha")
@@ -3752,11 +3758,11 @@ class ManualEditsPanel(ctk.CTkFrame):
 
         self._tool_var = tk.StringVar(value="Pencil")
         self._tools = ctk.CTkSegmentedButton(
-            self, values=["Pencil", "Eraser", "Picker", "Granulate"],
+            box, values=["Pencil", "Eraser", "Picker", "Granulate", "Smudge"],
             variable=self._tool_var, command=lambda _v: self._push())
         self._tools.pack(fill="x", padx=6, pady=2)
 
-        size_row = ctk.CTkFrame(self, fg_color="transparent")
+        size_row = ctk.CTkFrame(box, fg_color="transparent")
         size_row.pack(fill="x", padx=6, pady=2)
         ctk.CTkLabel(size_row, text="Brush (px):", anchor="w").pack(side="left")
         self._size_var = tk.IntVar(value=4)
@@ -3768,9 +3774,9 @@ class ManualEditsPanel(ctk.CTkFrame):
                                         command=lambda: self._bump_size(1))
         self._size_plus.pack(side="left", padx=(2, 0))
 
-        a_row = ctk.CTkFrame(self, fg_color="transparent")
+        a_row = ctk.CTkFrame(box, fg_color="transparent")
         a_row.pack(fill="x", padx=6, pady=2)
-        ctk.CTkLabel(a_row, text="Alpha:", anchor="w", width=48).pack(side="left")
+        ctk.CTkLabel(a_row, text="Alpha:", anchor="w", width=58).pack(side="left")
         self._alpha_var = tk.IntVar(value=255)
         ctk.CTkLabel(a_row, textvariable=self._alpha_var, width=34).pack(side="right")
         self._alpha_slider = ctk.CTkSlider(a_row, from_=0, to=255,
@@ -3778,16 +3784,16 @@ class ManualEditsPanel(ctk.CTkFrame):
         self._alpha_slider.set(255)
         self._alpha_slider.pack(side="left", fill="x", expand=True, padx=6)
 
-        c_row = ctk.CTkFrame(self, fg_color="transparent")
+        c_row = ctk.CTkFrame(box, fg_color="transparent")
         c_row.pack(fill="x", padx=6, pady=2)
-        ctk.CTkLabel(c_row, text="Colour:", anchor="w", width=48).pack(side="left")
+        ctk.CTkLabel(c_row, text="Colour:", anchor="w", width=58).pack(side="left")
         self._colour_btn = ctk.CTkButton(
             c_row, text="", width=44, height=24, fg_color=self._rgb_hex,
             hover_color=self._rgb_hex, command=self._pick_colour)
         self._colour_btn.pack(side="left", padx=6)
 
         # Granulate variation (max per-channel jitter around the source colour).
-        v_row = ctk.CTkFrame(self, fg_color="transparent")
+        v_row = ctk.CTkFrame(box, fg_color="transparent")
         v_row.pack(fill="x", padx=6, pady=2)
         ctk.CTkLabel(v_row, text="Variation:", anchor="w", width=58).pack(side="left")
         self._gran_var = tk.IntVar(value=12)
@@ -3797,19 +3803,40 @@ class ManualEditsPanel(ctk.CTkFrame):
         self._gran_slider.set(12)
         self._gran_slider.pack(side="left", fill="x", expand=True, padx=6)
 
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        # Smudge strength (0 = gentle nudge/feather, 100 = strong drag/blend).
+        s_row = ctk.CTkFrame(box, fg_color="transparent")
+        s_row.pack(fill="x", padx=6, pady=2)
+        ctk.CTkLabel(s_row, text="Strength:", anchor="w", width=58).pack(side="left")
+        self._strength_var = tk.IntVar(value=50)
+        ctk.CTkLabel(s_row, textvariable=self._strength_var, width=34).pack(side="right")
+        self._strength_slider = ctk.CTkSlider(s_row, from_=0, to=100,
+                                             number_of_steps=100, command=self._on_strength)
+        self._strength_slider.set(50)
+        self._strength_slider.pack(side="left", fill="x", expand=True, padx=6)
+
+        btn_row = ctk.CTkFrame(box, fg_color="transparent")
         btn_row.pack(fill="x", padx=6, pady=(6, 2))
         ctk.CTkButton(btn_row, text="Save edits…", width=100,
                       command=lambda: self.tune._save_edits()).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn_row, text="Load edits…", width=100,
                       command=lambda: self.tune._load_edits()).pack(side="left")
-        btn_row2 = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row2 = ctk.CTkFrame(box, fg_color="transparent")
         btn_row2.pack(fill="x", padx=6, pady=(0, 6))
         ctk.CTkButton(btn_row2, text="Delete all", width=100,
                       fg_color=("#b04a4a", "#7a3030"), hover_color=("#c25a5a", "#8a3838"),
                       command=lambda: self.tune._delete_all_edits()).pack(side="left")
 
         self.set_enabled(False, None, False)
+
+    def _update_visibility(self, show: bool):
+        """Show the tool controls only while editing is enabled."""
+        box = getattr(self, "_tool_box", None)
+        if box is None:
+            return
+        if show:
+            box.pack(fill="x")
+        else:
+            box.pack_forget()
 
     def _bump_size(self, d):
         self._size_var.set(max(1, min(256, self._size_var.get() + d)))
@@ -3821,6 +3848,10 @@ class ManualEditsPanel(ctk.CTkFrame):
 
     def _on_gran(self, v):
         self._gran_var.set(int(round(float(v))))
+        self._push()
+
+    def _on_strength(self, v):
+        self._strength_var.set(int(round(float(v))))
         self._push()
 
     def _pick_colour(self):
@@ -3837,14 +3868,15 @@ class ManualEditsPanel(ctk.CTkFrame):
         if e is None:
             return
         tool = self._TOOL_MAP.get(self._tool_var.get(), "pencil")
-        if tool == "granulate":
-            self._chan_var.set("RGB")          # granulate is RGB-only
+        if tool in self._RGB_ONLY_TOOLS:
+            self._chan_var.set("RGB")          # granulate / smudge are RGB-only
         e.channel = "alpha" if self._chan_var.get() == "Alpha" else "rgb"
         e.tool = tool
         e.brush = int(self._size_var.get())
         e.alpha_value = int(self._alpha_var.get())
         e.rgb_value = _hex_to_rgb(self._rgb_hex)
         e.granulate_amount = int(self._gran_var.get())
+        e.smudge_strength = int(self._strength_var.get()) / 100.0
         self.tune._update_edit_mode()          # refresh brush-cursor size + gating
 
     def sync_to_controller(self):
@@ -3875,14 +3907,19 @@ class ManualEditsPanel(ctk.CTkFrame):
                 w.configure(state="normal" if on else "disabled")
             except Exception:
                 pass
-        is_gran = self._TOOL_MAP.get(self._tool_var.get()) == "granulate"
+        tool = self._TOOL_MAP.get(self._tool_var.get())
+        is_gran = tool == "granulate"
+        is_smudge = tool == "smudge"
+        rgb_only = tool in self._RGB_ONLY_TOOLS
+        self._update_visibility(active)                 # hide the box until enabled
         _cfg(self._enable_cb, image_loaded)
         for w in (self._tools, self._size_minus, self._size_plus):
             _cfg(w, active)
-        _cfg(self._chan, active and not is_gran)        # granulate locks to RGB
-        _cfg(self._alpha_slider, active and channel == "alpha" and not is_gran)
-        _cfg(self._colour_btn, active and channel == "rgb" and not is_gran)
+        _cfg(self._chan, active and not rgb_only)       # granulate/smudge lock to RGB
+        _cfg(self._alpha_slider, active and channel == "alpha" and not rgb_only)
+        _cfg(self._colour_btn, active and channel == "rgb" and not rgb_only)
         _cfg(self._gran_slider, active and is_gran)
+        _cfg(self._strength_slider, active and is_smudge)
         if not image_loaded:
             self._hint.configure(text="Load an image to paint.")
         elif not active:
@@ -3891,6 +3928,10 @@ class ManualEditsPanel(ctk.CTkFrame):
             self._hint.configure(
                 text="Granulate — brush over flat areas to speckle the underlying "
                      "colour; Variation sets the amount. Ctrl+Z undo.")
+        elif is_smudge:
+            self._hint.configure(
+                text="Smudge — drag to blend colours together (Strength: low = "
+                     "gentle nudge, high = strong drag). Ctrl+Z undo.")
         else:
             ch = "Alpha" if channel == "alpha" else "RGB colour"
             self._hint.configure(
@@ -4380,8 +4421,11 @@ class TuneTab(ctk.CTkFrame):
                 except Exception:
                     pass
         self.edit = manual_edits.EditController(layer, on_change=self._on_edit_change)
-        # Source RGB is what the Granulate tool jitters around (the flat colour).
+        # Source RGB/alpha are what Granulate jitters around and what Smudge
+        # blends (alpha gates smudge so it doesn't smear the transparent base).
         self.edit.source_rgb = np.asarray(self.source_image.convert("RGB"), np.uint8)
+        self.edit.source_alpha = np.asarray(
+            self.source_image.convert("RGBA").getchannel("A"), np.uint8)
         self.params["_manual_edits"] = layer
         self._edit_enabled = False                 # editing starts off per image
         if hasattr(self, "manual_edits_panel"):

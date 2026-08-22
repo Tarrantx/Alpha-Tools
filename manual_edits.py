@@ -258,6 +258,51 @@ class EditLayer:
         if standalone:
             self.end_stroke()
 
+    def apply_smudge_dab(self, cx, cy, size: int, eff_rgb, eff_alpha, carried,
+                         strength: float, opacity_thresh: int = 8):
+        """Smudge/blend dab with a soft round brush. Blends the carried colour
+        into each pixel weighted by strength × radial falloff, writing to the
+        RGB layer, and carries the local colour along the stroke so dragging
+        pulls one colour into another (seamless blending). `eff_rgb` is the
+        frozen effective RGB (source + edits at stroke start); only pixels with
+        effective alpha >= opacity_thresh take part, so the transparent base
+        colour isn't smeared in. Returns the updated carried colour."""
+        if eff_rgb is None:
+            return carried
+        s = max(0.0, min(1.0, float(strength)))
+        r = max(1, int(size)) / 2.0
+        ci, cj = int(round(cy)), int(round(cx))
+        ir = int(np.ceil(r))
+        y0 = max(0, ci - ir); y1 = min(self.h, ci + ir + 1)
+        x0 = max(0, cj - ir); x1 = min(self.w, cj + ir + 1)
+        if x1 <= x0 or y1 <= y0:
+            return carried
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        w = np.clip(1.0 - np.hypot(xx - cx, yy - cy) / r, 0.0, 1.0)
+        if eff_alpha is not None:
+            w = w * (eff_alpha[y0:y1, x0:x1] >= opacity_thresh)
+        if w.max() <= 0.0:
+            return carried
+        eff = eff_rgb[y0:y1, x0:x1, :3].astype(np.float64)
+        wsum = float(w.sum())
+        local = (eff * w[..., None]).sum(axis=(0, 1)) / max(wsum, 1e-6)
+        if carried is None:
+            carried = local.copy()
+        standalone = self._pending is None
+        if standalone:
+            self._pending = []
+        self._snapshot(x0, y0, x1, y1)
+        dep = (s * w)[..., None]
+        out = eff * (1.0 - dep) + carried[None, None, :] * dep
+        changed = w > 0.0
+        reg = np.where(changed[..., None], out, self.rgb[y0:y1, x0:x1])
+        self.rgb[y0:y1, x0:x1] = np.clip(reg, 0, 255).astype(np.uint8)
+        self.rgb_mask[y0:y1, x0:x1] |= changed
+        self._version += 1
+        if standalone:
+            self.end_stroke()
+        return carried * s + local * (1.0 - s)
+
     def placed_into(self, w: int, h: int) -> "EditLayer":
         """A copy of this layer sized (w, h): identical when the size matches,
         otherwise pasted at (0,0) and clipped (fixed x,y). Used when loading a
@@ -314,7 +359,7 @@ class EditController:
     brush size and values. Interpolates dabs along a drag so fast strokes leave
     no gaps. `on_change` fires after any layer mutation (to refresh the preview).
     """
-    TOOLS = ("pencil", "eraser", "picker", "granulate")
+    TOOLS = ("pencil", "eraser", "picker", "granulate", "smudge")
 
     def __init__(self, layer: EditLayer, on_change=None):
         self.layer = layer
@@ -324,16 +369,21 @@ class EditController:
         self.alpha_value = 255
         self.rgb_value = (255, 0, 0)
         self.granulate_amount = 12             # max per-channel jitter (granulate)
-        self.source_rgb = None                 # HxWx3 uint8 base for granulate
+        self.smudge_strength = 0.5             # 0..1 (smudge)
+        self.source_rgb = None                 # HxWx3 uint8 base for granulate/smudge
+        self.source_alpha = None               # HxW uint8, gates smudge to opaque px
         self.on_change = on_change
         self._last = None
         self._stroking = False
         self._gran_base = None                 # frozen effective RGB for a stroke
+        self._eff_rgb = None                   # frozen effective RGB (smudge)
+        self._eff_alpha = None                 # frozen effective alpha (smudge)
+        self._smudge_carry = None              # carried colour along a smudge stroke
 
     def _effective_rgb(self):
         """Source RGB with the current manual RGB edits composited in — the base
-        the Granulate tool jitters around, so it BUILDS ON pencil edits instead
-        of erasing them back to the source colour."""
+        the Granulate/Smudge tools work on, so they BUILD ON pencil edits
+        instead of ignoring them."""
         if self.source_rgb is None:
             return None
         m = self.layer.rgb_mask
@@ -341,10 +391,25 @@ class EditController:
             return self.source_rgb             # no edits yet: source as-is
         return np.where(m[..., None], self.layer.rgb, self.source_rgb)
 
+    def _effective_alpha(self):
+        """Source alpha with manual alpha edits composited in (for the smudge
+        opacity gate)."""
+        if self.source_alpha is None:
+            return None
+        m = self.layer.alpha_mask
+        if not m.any():
+            return self.source_alpha
+        return np.where(m, self.layer.alpha, self.source_alpha)
+
     def _dab(self, sx, sy):
         if self.tool == "granulate":
             self.layer.apply_granulate_dab(sx, sy, self.brush, self._gran_base,
                                            self.granulate_amount)
+            return
+        if self.tool == "smudge":
+            self._smudge_carry = self.layer.apply_smudge_dab(
+                sx, sy, self.brush, self._eff_rgb, self._eff_alpha,
+                self._smudge_carry, self.smudge_strength)
             return
         mode = "erase" if self.tool == "eraser" else "paint"
         self.layer.apply_dab(sx, sy, self.brush, self.channel, mode,
@@ -358,6 +423,10 @@ class EditController:
             # Freeze the base once per stroke (source + existing edits) so a
             # stroke can't compound its own jitter and pencil edits survive.
             self._gran_base = self._effective_rgb()
+        elif self.tool == "smudge":
+            self._eff_rgb = self._effective_rgb()
+            self._eff_alpha = self._effective_alpha()
+            self._smudge_carry = None
         self.layer.begin_stroke()
         self._stroking = True
         self._last = (sx, sy)
@@ -380,6 +449,9 @@ class EditController:
             return
         self.layer.end_stroke()
         self._gran_base = None
+        self._eff_rgb = None
+        self._eff_alpha = None
+        self._smudge_carry = None
         self._stroking = False
         self._last = None
         self._changed()
