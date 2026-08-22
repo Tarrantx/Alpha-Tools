@@ -3603,7 +3603,11 @@ def find_preset_path(name: str) -> Path | None:
 
 
 def save_preset(path: Path, params: dict):
-    payload = {"version": 1, "params": params}
+    # Persist only real parameters — drop private/runtime keys (e.g. the live
+    # _manual_edits EditLayer, _manual_edits_fit, _roi_ctx), which aren't JSON
+    # serialisable and don't belong in a preset.
+    clean = {k: v for k, v in params.items() if not k.startswith("_")}
+    payload = {"version": 1, "params": clean}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 

@@ -70,6 +70,43 @@ def quantize_image(img: Image.Image, colors: int) -> Image.Image:
     ).convert("RGB")
 
 
+def _base_transparent_rgb(rgba: Image.Image) -> "tuple[int, int, int]":
+    """The dominant RGB of the fully-transparent pixels (the 'base' colour),
+    defaulting to black when there are none."""
+    a = np.asarray(rgba.convert("RGBA"))
+    tmask = a[..., 3] == 0
+    if not tmask.any():
+        return (0, 0, 0)
+    vals, counts = np.unique(a[tmask][:, :3], axis=0, return_counts=True)
+    return tuple(int(x) for x in vals[counts.argmax()])
+
+
+def _preserve_transparent_rgb(q: Image.Image, original: Image.Image) -> Image.Image:
+    """Quantisers (libimagequant especially) collapse all transparent pixels to
+    one palette entry and give it an ARBITRARY RGB — often a green — which stays
+    invisible until edge filtering bleeds it as a coloured halo. Rewrite every
+    fully-transparent palette entry's RGB to the image's base colour (the
+    original transparent RGB) so the base colour is preserved and no fringe
+    appears. Keeps the image indexed."""
+    if q.mode != "P" or q.palette is None:
+        return q
+    try:
+        raw = list(q.getpalette(rawmode="RGBA") or [])
+    except (ValueError, TypeError):
+        return q
+    if not raw:
+        return q
+    br, bg, bb = _base_transparent_rgb(original)
+    changed = False
+    for i in range(0, len(raw), 4):
+        if raw[i + 3] == 0:                 # fully-transparent entry
+            raw[i], raw[i + 1], raw[i + 2] = br, bg, bb
+            changed = True
+    if changed:
+        q.putpalette(raw, rawmode="RGBA")
+    return q
+
+
 def quantize_rgba(img: Image.Image, colors: int,
                   dither_level: float = 0.0) -> Image.Image:
     """Reduce to <= `colors` palette entries while RETAINING the alpha channel
@@ -90,15 +127,17 @@ def quantize_rgba(img: Image.Image, colors: int,
     rgba = img.convert("RGBA")
     if HAS_IMAGEQUANT:
         try:
-            return _imagequant.quantize_pil_image(
+            q = _imagequant.quantize_pil_image(
                 rgba, dithering_level=d, max_colors=colors,
             )
+            return _preserve_transparent_rgb(q, rgba)
         except RuntimeError:
             pass
-    return rgba.quantize(
+    q = rgba.quantize(
         colors=colors, method=Image.Quantize.FASTOCTREE,
         dither=Image.Dither.FLOYDSTEINBERG if d > 0 else Image.Dither.NONE,
     )
+    return _preserve_transparent_rgb(q, rgba)
 
 
 # Small cache so the live preview doesn't re-read + re-quantise the reference
