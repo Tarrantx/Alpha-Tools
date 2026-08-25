@@ -89,25 +89,37 @@ disp_w = max(1, int(round((src_x1 - src_x0) * eff)))
 disp_h = max(1, int(round((src_y1 - src_y0) * eff)))
 resample = Image.Resampling.NEAREST if eff >= 1.5 else Image.Resampling.LANCZOS
 scaled = crop.resize((disp_w, disp_h), resample=resample)
-if self._grid is not None:
-    scaled = self._apply_grid(scaled, eff, src_x0, src_y0)   # note new signature
 self._photo = ImageTk.PhotoImage(scaled)
 
 # Place the crop where its source top-left maps to on the canvas.
 self._image_id = self.canvas.create_image(
     left + src_x0 * eff, top + src_y0 * eff, image=self._photo, anchor="nw")
-# Part B adds a detail-overlay call here.
+# Part B adds the detail-overlay call here, THEN the grid on top (see A2).
+self._draw_detail(eff, left, top, src_x0, src_y0, src_x1, src_y1)
+self._draw_grid(eff, left, top, src_x0, src_y0, disp_w, disp_h)
 ```
 
-### A2. Make the grid overlay crop-aware
+### A2. The grid overlay — crop-aware, source-scaled, drawn on top
 
-`_apply_grid` used to build a full-image-sized overlay and cache it. Now it draws a
-viewport-sized overlay whose lines are placed at **source multiples of `size`**
-offset by the crop origin. New signature `(_apply_grid(self, scaled, eff, src_x0,
-src_y0))`. Line positions: first line at `k*size` where `k = ceil(src_x0 / size)`
-(integer ceil: `-(-src_x0 // size)`), crop-local screen x `= (k*size - src_x0)*eff`,
-step `size*eff`. Build fresh each frame (viewport-sized → cheap); drop the old
-`_grid_overlay_cache` usage.
+The grid is **no longer composited into `scaled`** — it's drawn as the **top-most
+canvas layer** (`_draw_grid`) *after* the low-res crop and the full-res detail
+overlay, so zooming a downscaled preview can't bury it under the detail image.
+
+- `_build_grid_overlay(dw, dh, eff, src_x0, src_y0)` returns a transparent RGBA
+  overlay (or `None` when off / too dense), and `_draw_grid` places it as its own
+  `create_image` on top. Keep the ref alive (`self._photo_grid`).
+- Lines sit on **SOURCE-pixel** multiples of `size`. Because `_base_img` may be a
+  downscaled preview, the widget is told the source→preview scale via
+  `set_source_scale()`; the base-pixel step is `size / _source_scale` so a "16"
+  grid lands on real 16-px source seams (and aligns with the detail overlay),
+  not on downscaled-preview pixels.
+- `_grid_axis_lines(src0, extent, gstep_base, eff, width)` is a pure/testable
+  generator: first line at `k*gstep_base` (`k = ceil(src0 / gstep_base)` via
+  `np.ceil`), crop-local screen pos `= (k*gstep_base - src0)*eff`, step
+  `gstep_base*eff`; empty when `< 2` screen px. Uses a fixed integer line width so
+  a 1-px line always draws even on an exact pixel boundary (round-half-to-even
+  used to drop it). The old `_apply_grid` / `_grid_overlay_cache` / `_stripes`
+  helpers are gone.
 
 ### A3. Result
 
