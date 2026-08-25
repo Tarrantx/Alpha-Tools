@@ -26,7 +26,7 @@ It has a live **Tune** tab (single image, side‑by‑side before/after with zoo
 
 **Finishing**
 - **Pixelate** (fractional factors) and **soften edges** (alpha‑outline blur, RGB only).
-- Output **colour depth / palette**: reduce via libimagequant, with **dithering** (rendered at pixel‑art block resolution) and **custom‑palette matching** to any reference image. Reducing colour depth **preserves the transparent base colour** (black / white / whatever it is) instead of leaving an arbitrary fringe.
+- Output **colour depth / palette**: reduce via libimagequant, with **dithering** (rendered at pixel‑art block resolution) and **custom‑palette matching** to any reference image. **Protect vivid colours** reserves palette slots for small saturated accents (e.g. red eyes on a grey body) so they survive aggressive reduction instead of merging into the dominant range. Reducing colour depth **preserves the transparent base colour** (black / white / whatever it is) instead of leaving an arbitrary fringe.
 - A 5‑slot **post‑processing effects chain**: unsharp, bilateral smooth, saturation boost, emboss, chrome, bevel, Dave Hill, texturize, watercolor, screen effects (mesh / displace), colour tint, film grain, frosted glass, lomo, oil paint, granulate, turbulence, normal map, CRT scanlines.
 
 **Preview (Tune tab)**
