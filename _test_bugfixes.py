@@ -57,6 +57,61 @@ def test_save_preset_drops_private_keys():
             os.remove(p)
 
 
+def _wolf(seed=3):
+    """Grey body (many shades) + tiny red eyes, fully opaque."""
+    rng = np.random.default_rng(seed)
+    H = W = 72
+    a = np.zeros((H, W, 4), np.uint8)
+    a[..., :3] = np.clip(120 + rng.integers(-40, 40, (H, W, 1)), 0, 255)
+    a[..., 3] = 255
+    yy, xx = np.mgrid[0:H, 0:W]
+    for ex in (28, 44):
+        eye = ((xx - ex) ** 2 + (yy - 28) ** 2) <= 5
+        a[eye, :3] = (205, 25, 25)
+    return Image.fromarray(a, "RGBA")
+
+
+def _eye(img):
+    return tuple(int(x) for x in np.asarray(img.convert("RGB"))[28, 28])
+
+
+def test_protect_vivid_keeps_accent():
+    src = _wolf()
+    p = {"quantize_mode": "4 (2-bit)", "snap_enabled": False}
+    normal = _eye(ap.process_pil(src, p))
+    prot = _eye(ap.process_pil(src, {**p, "quantize_protect_vivid": True,
+                                     "quantize_reserve": 2, "quantize_sat_thresh": 45}))
+    # normal loses the red (eye goes grey/pink); protected keeps it near source.
+    assert abs(prot[0] - 205) < 40 and prot[1] < 80 and prot[2] < 80, f"not protected: {prot}"
+    assert not (abs(normal[0] - 205) < 40 and normal[1] < 80), f"normal unexpectedly kept red: {normal}"
+
+
+def test_protect_off_by_default():
+    src = _wolf()
+    a = np.asarray(ap.process_pil(src, {"quantize_mode": "4 (2-bit)"}).convert("RGBA"))
+    b = np.asarray(ap.process_pil(src, {"quantize_mode": "4 (2-bit)",
+                                        "quantize_protect_vivid": False}).convert("RGBA"))
+    assert np.array_equal(a, b)                      # default == explicit-off
+
+
+def test_protect_roi_parity():
+    """A crop containing the eyes matches the same region of the full render
+    (the reserved-accent palette is injected via compute_roi_ctx)."""
+    src = _wolf()
+    p = {"quantize_mode": "4 (2-bit)", "snap_enabled": False,
+         "quantize_protect_vivid": True, "quantize_reserve": 2,
+         "quantize_sat_thresh": 45}
+    full = np.asarray(ap.process_pil(src, p).convert("RGBA"))
+    rect = (16, 16, 56, 40)
+    crop, _ = ap.process_crop(src, p, rect)
+    crop = np.asarray(crop.convert("RGBA"))
+    assert crop.shape[:2] == (rect[3] - rect[1], rect[2] - rect[0])
+    # The eye colours in the crop match the full render (both red, same palette).
+    fe = tuple(int(x) for x in full[28, 28])
+    ce = tuple(int(x) for x in crop[28 - 16, 28 - 16])
+    assert fe == ce and fe[0] > 150 and fe[1] < 80
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

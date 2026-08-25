@@ -414,6 +414,23 @@ HELP_TEXT = {
         "resolution and upscaled, so each dither dot is a chunky block (proper "
         "pixel-art dithering) rather than fine full-resolution speckle.",
 
+    "quantize_protect_vivid":
+        "When reducing to a colour count, reserve a few palette slots for the "
+        "most vivid (high‑chroma) colours in the image, so small saturated "
+        "details survive aggressive reduction instead of being merged into the "
+        "dominant range — e.g. red eyes on a grey wolf.\n\n"
+        "The rest of the palette is quantised to (count − reserved) colours as "
+        "usual, so at very small counts you trade some shades of the dominant "
+        "colour for the accents. No effect with Full colour or Match palette "
+        "image.",
+    "quantize_reserve":
+        "How many vivid accent colours to reserve palette slots for (1–8). Each "
+        "reserved slot is one fewer for the dominant colours, so keep it small.",
+    "quantize_sat_thresh":
+        "How saturated a colour must be (chroma = max−min channel, 0–255) to "
+        "count as a vivid accent worth protecting. Higher = only the most vivid "
+        "colours; lower also protects gentler tints. Grey/near‑grey is ~0–30.",
+
     "quantize_use_palette":
         "Match the texture to the colours of a reference palette image instead "
         "of reducing to a fixed colour count. Pick any image (a palette strip, "
@@ -2571,6 +2588,40 @@ class ParameterPanel(ctk.CTkScrollableFrame):
         )
         dither_row.pack(fill="x")
         self.rows.append(dither_row)
+
+        # Protect vivid colours — reserve palette slots for high-chroma accents
+        # (e.g. red eyes on a grey body) so they survive aggressive reduction.
+        prot_section = ctk.CTkFrame(self, fg_color="transparent")
+        prot_section.pack(fill="x")
+        prot_toggle = ToggleRow(
+            prot_section, "Protect vivid colours", "quantize_protect_vivid",
+            self.params, help_text=H["quantize_protect_vivid"], on_change=self._fire,
+        )
+        prot_toggle.pack(fill="x")
+        self.rows.append(prot_toggle)
+        prot_box = ctk.CTkFrame(prot_section, fg_color="transparent")
+        reserve_row = SliderRow(
+            prot_box, "Reserve slots", "quantize_reserve",
+            self.params, 1, 8, 1, "{:.0f}",
+            help_text=H["quantize_reserve"], on_change=self._fire,
+        )
+        reserve_row.pack(fill="x")
+        self.rows.append(reserve_row)
+        sat_row = SliderRow(
+            prot_box, "Min saturation", "quantize_sat_thresh",
+            self.params, 0, 128, 1, "{:.0f}",
+            help_text=H["quantize_sat_thresh"], on_change=self._fire,
+        )
+        sat_row.pack(fill="x")
+        self.rows.append(sat_row)
+
+        def _update_prot_vis(*_):
+            if prot_toggle.var.get():
+                prot_box.pack(fill="x")
+            else:
+                prot_box.pack_forget()
+        prot_toggle.var.trace_add("write", lambda *a: _update_prot_vis())
+        _update_prot_vis()
 
         # Custom palette match (persistent wrapper so the path row toggles in
         # place without jumping below the trailing spacer).

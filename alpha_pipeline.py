@@ -107,8 +107,65 @@ def _preserve_transparent_rgb(q: Image.Image, original: Image.Image) -> Image.Im
     return q
 
 
+def _detect_accents(rgba: Image.Image, reserve: int, sat: int) -> np.ndarray:
+    """Up to `reserve` vivid 'accent' colours in the image — high-chroma opaque
+    pixels the quantiser would otherwise merge away (e.g. red eyes on a grey
+    body). Returns an (k,3) uint8 array (empty when there are none)."""
+    reserve = max(0, min(16, int(reserve)))
+    if reserve <= 0:
+        return np.zeros((0, 3), np.uint8)
+    arr = np.asarray(rgba.convert("RGBA"))
+    rgb = arr[..., :3].astype(np.int16)
+    alpha = arr[..., 3]
+    chroma = rgb.max(2) - rgb.min(2)                 # simple saturation proxy
+    vivid = (chroma > int(sat)) & (alpha > 8)
+    if int(vivid.sum()) < 4:
+        return np.zeros((0, 3), np.uint8)
+    vp = rgb[vivid].astype(np.uint8)                 # M x 3
+    distinct = np.unique(vp, axis=0)
+    k = min(reserve, len(distinct))
+    if k <= 0:
+        return np.zeros((0, 3), np.uint8)
+    if len(distinct) <= k:
+        return distinct[:k]
+    vq = Image.fromarray(vp.reshape(-1, 1, 3), "RGB").quantize(
+        colors=k, method=Image.Quantize.FASTOCTREE)
+    pal = np.frombuffer(bytes(vq.getpalette()), np.uint8).reshape(-1, 3)
+    used = np.unique(np.asarray(vq))
+    return pal[used][:k].copy()
+
+
+def _reserve_accents(q: Image.Image, rgba: Image.Image, accents: np.ndarray,
+                     base_n: int, sat: int) -> Image.Image:
+    """Add `accents` to `q`'s palette at free slots (base_n..) and re-point the
+    vivid opaque pixels to the nearest accent, leaving every other pixel exactly
+    as the base quantiser mapped it. Keeps the result indexed."""
+    k = len(accents)
+    if k == 0 or base_n + k > 256:
+        return q
+    raw = np.frombuffer(bytes(q.getpalette(rawmode="RGBA")), np.uint8).reshape(256, 4).copy()
+    for i, c in enumerate(accents):
+        raw[base_n + i] = (int(c[0]), int(c[1]), int(c[2]), 255)
+    idx = np.array(q, np.uint8)
+    arr = np.asarray(rgba.convert("RGBA"))
+    rgb = arr[..., :3].astype(np.int16)
+    chroma = rgb.max(2) - rgb.min(2)
+    cand = (chroma > int(sat)) & (arr[..., 3] > 8)
+    if cand.any():
+        cvals = rgb[cand].astype(np.int32)
+        acc = accents.astype(np.int32)
+        nearest = (((cvals[:, None, :] - acc[None, :, :]) ** 2).sum(2)).argmin(1)
+        flat = idx.reshape(-1)
+        flat[np.flatnonzero(cand.reshape(-1))] = (base_n + nearest).astype(np.uint8)
+        idx = flat.reshape(idx.shape)
+    out = Image.fromarray(idx, "P")
+    out.putpalette(raw.reshape(-1).tolist(), rawmode="RGBA")
+    return out
+
+
 def quantize_rgba(img: Image.Image, colors: int,
-                  dither_level: float = 0.0) -> Image.Image:
+                  dither_level: float = 0.0, protect: bool = False,
+                  reserve: int = 2, sat: int = 40) -> Image.Image:
     """Reduce to <= `colors` palette entries while RETAINING the alpha channel
     (libimagequant — the pngquant engine — which quantises RGBA and keeps a
     per-entry alpha). Returns a paletted 'P' image with an RGBA palette;
@@ -125,18 +182,23 @@ def quantize_rgba(img: Image.Image, colors: int,
     colors = max(2, min(256, int(colors)))
     d = max(0.0, min(1.0, float(dither_level)))
     rgba = img.convert("RGBA")
+    # Reserve palette slots for vivid accent colours so they survive aggressive
+    # reduction (quantise the rest to colors - k, then graft the accents in).
+    accents = _detect_accents(rgba, reserve, sat) if protect else np.zeros((0, 3), np.uint8)
+    base_n = max(2, colors - len(accents))
+    q = None
     if HAS_IMAGEQUANT:
         try:
             q = _imagequant.quantize_pil_image(
-                rgba, dithering_level=d, max_colors=colors,
-            )
-            return _preserve_transparent_rgb(q, rgba)
+                rgba, dithering_level=d, max_colors=base_n)
         except RuntimeError:
-            pass
-    q = rgba.quantize(
-        colors=colors, method=Image.Quantize.FASTOCTREE,
-        dither=Image.Dither.FLOYDSTEINBERG if d > 0 else Image.Dither.NONE,
-    )
+            q = None
+    if q is None:
+        q = rgba.quantize(
+            colors=base_n, method=Image.Quantize.FASTOCTREE,
+            dither=Image.Dither.FLOYDSTEINBERG if d > 0 else Image.Dither.NONE)
+    if len(accents):
+        q = _reserve_accents(q, rgba, accents, base_n, sat)
     return _preserve_transparent_rgb(q, rgba)
 
 
@@ -410,6 +472,9 @@ DEFAULT_PARAMS = {
     "quantize_dither":            0.0,     # 0-1 error-diffusion dither (blocks when pixelating)
     "quantize_use_palette":       False,   # match a reference palette image instead of a colour count
     "quantize_palette_path":      "",      # path to the reference palette image
+    "quantize_protect_vivid":     False,   # reserve palette slots for vivid accent colours
+    "quantize_reserve":           2,       # how many accent slots to reserve (1-8)
+    "quantize_sat_thresh":        40,      # min chroma (max-min, 0-255) to count as vivid
 
     # Batch colour match to a reference image (kills animation colour flicker).
     # Set + driven by the Batch tab; inert in single-image Tune (no reference).
@@ -2518,7 +2583,11 @@ def _stage_quantize(out: Image.Image, params: dict) -> Image.Image:
             # re-derived from just the crop.
             quant_fn = lambda im: quantize_to_palette(im, override, dither)  # noqa: E731
         else:
-            quant_fn = lambda im: quantize_rgba(im, n, dither)     # noqa: E731
+            protect = bool(params.get("quantize_protect_vivid", False))
+            reserve = int(params.get("quantize_reserve", 2))
+            sat = int(params.get("quantize_sat_thresh", 40))
+            quant_fn = lambda im: quantize_rgba(         # noqa: E731
+                im, n, dither, protect=protect, reserve=reserve, sat=sat)
 
     # Dithering only reads as pixel art when applied at the block resolution.
     if dither > 0 and factor > 1:
@@ -2658,8 +2727,16 @@ def compute_roi_ctx(last_after: Optional[Image.Image], params: dict,
         n = _QUANTIZE_COLORS.get(str(params.get("quantize_mode", "Full colour")), 0)
         if n > 0:
             try:
-                ctx["quantize_palette"] = last_after.convert("RGB").quantize(
-                    colors=max(2, min(256, n)))
+                if params.get("quantize_protect_vivid"):
+                    # Build the whole-image palette WITH the reserved accents so a
+                    # zoomed crop (which may not contain them) still maps to them.
+                    ctx["quantize_palette"] = quantize_rgba(
+                        last_after, max(2, min(256, n)), 0.0, protect=True,
+                        reserve=int(params.get("quantize_reserve", 2)),
+                        sat=int(params.get("quantize_sat_thresh", 40)))
+                else:
+                    ctx["quantize_palette"] = last_after.convert("RGB").quantize(
+                        colors=max(2, min(256, n)))
             except Exception:
                 pass
     return ctx
@@ -2978,7 +3055,10 @@ class PreviewPipeline:
                     p.get("quantize_dither", 0.0),
                     p.get("quantize_use_palette", False),
                     p.get("quantize_palette_path", ""),
-                    p.get("pixelate_factor", 1.0))
+                    p.get("pixelate_factor", 1.0),
+                    p.get("quantize_protect_vivid", False),
+                    p.get("quantize_reserve", 2),
+                    p.get("quantize_sat_thresh", 40))
 
         def r_quant(s, p, tmp):
             s.out = _stage_quantize(s.out, p)
