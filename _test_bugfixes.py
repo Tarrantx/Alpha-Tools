@@ -86,6 +86,27 @@ def test_protect_vivid_keeps_accent():
     assert not (abs(normal[0] - 205) < 40 and normal[1] < 80), f"normal unexpectedly kept red: {normal}"
 
 
+def test_protect_preserves_alpha():
+    """Protect vivid colours must NOT change any pixel's alpha — a semi-
+    transparent vivid pixel must keep its alpha (regression: it was forced to
+    255 by the opaque accent entry)."""
+    H = W = 48
+    a = np.zeros((H, W, 4), np.uint8)
+    a[:, :24, :3] = (120, 120, 120); a[:, :24, 3] = 255      # opaque grey
+    a[:24, 24:, :3] = (200, 30, 30); a[:24, 24:, 3] = 127    # semi-trans red (vivid)
+    a[24:, 24:, :3] = (120, 120, 120); a[24:, 24:, 3] = 127  # semi-trans grey
+    a[10:14, 10:14, :3] = (200, 30, 30); a[10:14, 10:14, 3] = 255  # opaque red eye
+    src = Image.fromarray(a, "RGBA")
+    q = ap.quantize_rgba(src, 4, protect=True, reserve=2, sat=45)
+    out = np.asarray(q.convert("RGBA"))
+    # semi-transparent vivid region keeps 127; alpha set is unchanged.
+    assert set(int(x) for x in np.unique(out[:24, 24:, 3])) == {127}
+    assert set(int(x) for x in np.unique(out[..., 3])) == {127, 255}
+    # opaque accent still protected.
+    eye = tuple(int(x) for x in out[12, 12])
+    assert eye[0] > 150 and eye[1] < 80 and eye[3] == 255
+
+
 def test_protect_off_by_default():
     src = _wolf()
     a = np.asarray(ap.process_pil(src, {"quantize_mode": "4 (2-bit)"}).convert("RGBA"))

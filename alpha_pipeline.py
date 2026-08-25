@@ -118,7 +118,9 @@ def _detect_accents(rgba: Image.Image, reserve: int, sat: int) -> np.ndarray:
     rgb = arr[..., :3].astype(np.int16)
     alpha = arr[..., 3]
     chroma = rgb.max(2) - rgb.min(2)                 # simple saturation proxy
-    vivid = (chroma > int(sat)) & (alpha > 8)
+    # Only FULLY-OPAQUE pixels — the reserved accent entries are opaque, so
+    # protecting a semi-transparent pixel would force its alpha to 255.
+    vivid = (chroma > int(sat)) & (alpha == 255)
     if int(vivid.sum()) < 4:
         return np.zeros((0, 3), np.uint8)
     vp = rgb[vivid].astype(np.uint8)                 # M x 3
@@ -150,7 +152,8 @@ def _reserve_accents(q: Image.Image, rgba: Image.Image, accents: np.ndarray,
     arr = np.asarray(rgba.convert("RGBA"))
     rgb = arr[..., :3].astype(np.int16)
     chroma = rgb.max(2) - rgb.min(2)
-    cand = (chroma > int(sat)) & (arr[..., 3] > 8)
+    # Fully-opaque only — must match _detect_accents so we never alter alpha.
+    cand = (chroma > int(sat)) & (arr[..., 3] == 255)
     if cand.any():
         cvals = rgb[cand].astype(np.int32)
         acc = accents.astype(np.int32)
