@@ -468,6 +468,8 @@ DEFAULT_PARAMS = {
     # Stylise
     "pixelate_factor":            1.0,   # 1 = off; N = ~NxN blocks. Fractional (1.5) = milder
     "soften_edges":               0,     # px Gaussian blur of RGB along the alpha outline; 0 = off
+    "soften_dither":              False, # add a dither on top of the soften-edge blur (same band)
+    "soften_dither_strength":     40,    # 0-100 dither amount within the soften band
 
     # Output colour depth — "Full colour" | "256 (8-bit)" | "16 (4-bit)".
     # Quantises the final image to a palette (alpha retained). Final stage.
@@ -1982,7 +1984,25 @@ def pixelate(rgba: Image.Image, factor: float,
     return small.resize((w, h), resample=Image.Resampling.NEAREST)
 
 
-def soften_edges(rgb: Image.Image, alpha: Image.Image, radius: int) -> Image.Image:
+def _edge_dither_noise(h: int, w: int, origin) -> np.ndarray:
+    """Deterministic per-pixel dither in [-0.5, 0.5], keyed on the ABSOLUTE
+    source coordinate (origin = crop's source x,y) so the pattern is identical
+    across the whole-image save and a zoomed ROI crop, and stable across
+    re-renders (no flicker). Monochrome (one value per pixel)."""
+    ox, oy = int(origin[0]), int(origin[1])
+    yy, xx = np.mgrid[oy:oy + h, ox:ox + w]
+    x = xx.astype(np.uint64)
+    y = yy.astype(np.uint64)
+    z = x * np.uint64(2654435761) + y * np.uint64(2246822519)
+    z ^= z >> np.uint64(13)
+    z *= np.uint64(0x9E3779B97F4A7C15)
+    z ^= z >> np.uint64(16)
+    return (z & np.uint64(0xFFFFFF)).astype(np.float64) / float(0xFFFFFF) - 0.5
+
+
+def soften_edges(rgb: Image.Image, alpha: Image.Image, radius: int,
+                 dither: bool = False, strength: int = 0,
+                 origin=(0, 0)) -> Image.Image:
     """Gaussian-soften the RGB in a band along the alpha outline only; the
     alpha channel and the texture interior are left untouched. radius=0 is a
     no-op.
@@ -1994,6 +2014,11 @@ def soften_edges(rgb: Image.Image, alpha: Image.Image, radius: int) -> Image.Ima
     can't bleed into the visible edge and create a dark halo.
 
     radius sets both the blur strength and the width of the softened band.
+
+    `dither` adds a zero-mean brightness dither ON TOP of the blur, confined to
+    the same softened band (weighted by its ramp, so it fades with the blur and
+    the interior stays crisp). `strength` 0-100 sets the amount; `origin` is the
+    crop's source x,y for ROI parity.
     """
     r = int(radius)
     if r <= 0:
@@ -2026,6 +2051,15 @@ def soften_edges(rgb: Image.Image, alpha: Image.Image, radius: int) -> Image.Ima
     band = band[:, :, None]
 
     out = rgb_arr * (1.0 - band) + blurred * band
+
+    # Optional dither on top of the blur, in the SAME band (weighted by its
+    # ramp). Amplitude scales with strength; deterministic per source pixel.
+    if dither and int(strength) > 0:
+        amp = max(0, min(100, int(strength))) / 100.0 * 48.0    # max +/- offset
+        H, W = rgb_arr.shape[:2]
+        n = _edge_dither_noise(H, W, origin)[:, :, None]        # [-0.5, 0.5]
+        out = out + n * (2.0 * amp) * band
+
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGB")
 
 
@@ -2472,7 +2506,13 @@ def _stage_soften_edges(out: Image.Image, params: dict) -> Image.Image:
     if r <= 0 or out.mode != "RGBA":
         return out
     alpha = out.getchannel("A")
-    softened = soften_edges(out.convert("RGB"), alpha, r)
+    region = (params.get("_roi_ctx") or {}).get("manual_src_region")
+    origin = (region[0], region[1]) if region else (0, 0)
+    softened = soften_edges(
+        out.convert("RGB"), alpha, r,
+        dither=bool(params.get("soften_dither", False)),
+        strength=int(params.get("soften_dither_strength", 40)),
+        origin=origin)
     res = softened.convert("RGBA")
     res.putalpha(alpha)
     return res
@@ -3031,7 +3071,9 @@ class PreviewPipeline:
             s.out = _stage_pixelate(s.out, p)
 
         def k_soften(p, t):
-            return (p.get("soften_edges", 0),)
+            return (p.get("soften_edges", 0),
+                    p.get("soften_dither", False),
+                    p.get("soften_dither_strength", 40))
 
         def r_soften(s, p, tmp):
             s.out = _stage_soften_edges(s.out, p)

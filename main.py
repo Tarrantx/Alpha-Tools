@@ -389,6 +389,15 @@ HELP_TEXT = {
         "silhouette; the value (px) sets both the blur strength and how far in "
         "from the edge it reaches. The blur is alpha-weighted so transparent "
         "fill colours don't bleed in as a dark halo. 0 = off.",
+    "soften_dither":
+        "Add a dither on TOP of the soften-edge blur — a zero-mean brightness "
+        "speckle confined to the same softened band (fading with the blur ramp). "
+        "Breaks up the smooth blurred gradient so the softened edge reads less "
+        "obviously blurred / more natural. Needs Soften edges > 0.",
+    "soften_dither_strength":
+        "How much dither to add within the softened band (0–100). 0 = none; "
+        "higher = coarser speckle. The dither is deterministic per pixel, so the "
+        "preview matches the saved result.",
 
     "quantize_mode":
         "Final output colour depth. Reduces the texture to a fixed palette "
@@ -2570,6 +2579,32 @@ class ParameterPanel(ctk.CTkScrollableFrame):
             help_text=H["soften_edges"], on_change=self._fire,
         ))
         self.rows[-1].pack(fill="x")
+
+        # Optional dither on top of the soften-edge blur (within the same band).
+        soft_section = ctk.CTkFrame(self, fg_color="transparent")
+        soft_section.pack(fill="x")
+        dither_toggle = ToggleRow(
+            soft_section, "Dither soften edges", "soften_dither",
+            self.params, help_text=H["soften_dither"], on_change=self._fire,
+        )
+        dither_toggle.pack(fill="x")
+        self.rows.append(dither_toggle)
+        dither_box = ctk.CTkFrame(soft_section, fg_color="transparent")
+        strength_row = SliderRow(
+            dither_box, "Dither strength", "soften_dither_strength",
+            self.params, 0, 100, 1, "{:.0f}",
+            help_text=H["soften_dither_strength"], on_change=self._fire,
+        )
+        strength_row.pack(fill="x")
+        self.rows.append(strength_row)
+
+        def _update_soft_dither_vis(*_):
+            if dither_toggle.var.get():
+                dither_box.pack(fill="x")
+            else:
+                dither_box.pack_forget()
+        dither_toggle.var.trace_add("write", lambda *a: _update_soft_dither_vis())
+        _update_soft_dither_vis()
 
     def _build_quantize(self):
         H = HELP_TEXT
