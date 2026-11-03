@@ -474,7 +474,7 @@ HELP_TEXT = {
         "Optional post-processing effect applied AFTER all alpha cleanup. "
         "Operates on the RGB channels only — the cleaned alpha is preserved "
         "and reattached, unless the effect produces a different artefact "
-        "(e.g. Normal Map → no alpha).\n\n"
+        "(Normal Map with the Original method → no alpha).\n\n"
         "Up to 4 chained slots: slot #1 runs first, then #2, etc. Slots set "
         "to 'None' are skipped. Typical chains:\n"
         "  • Bilateral Smooth → Unsharp Mask → Saturation Boost (clean+crisp)\n"
@@ -482,6 +482,38 @@ HELP_TEXT = {
         "  • Normal Map alone (output a tangent-space normal map)\n\n"
         "Requires magick.exe for IM-based effects (Normal Map runs in pure "
         "Python).",
+
+    "fx_normal_method":
+        "How the Normal Map builds its surface height.\n\n"
+        "  Sprite (alpha-aware) — for sprites / cut-outs with transparency "
+        "(port of Sprite Fusion's Sprite Normals). Height = a rounded volume "
+        "rising from the silhouette + the sprite's own shading, so even a "
+        "flat-colour sprite gets relief. Transparent pixels are ignored (the "
+        "colour under them never counts) and get a flat normal; the alpha is "
+        "kept. Each separate piece is processed on its own, so packed sprites "
+        "don't bleed into each other.\n"
+        "  Original (luminance) — the previous method: brightness alone is the "
+        "height, pixel-to-pixel slopes, DirectX green, no alpha. Use it for "
+        "opaque / tiling textures (walls, floors) — Sprite would dome the "
+        "whole image.\n\n"
+        "Strength scales the result in both methods.",
+    "fx_normal_format":
+        "Green-channel convention of the Sprite normal map.\n"
+        "  OpenGL (Y+) — Godot, Unity, Blender.\n"
+        "  DirectX (Y−) — Unreal, 3ds Max.\n"
+        "The wrong one makes the lighting look upside down. (Original is "
+        "always DirectX.)",
+    "fx_normal_volume":
+        "Sprite method: how strongly the silhouette rounds up into a "
+        "pillow-like volume. 0 = shading relief only.",
+    "fx_normal_detail":
+        "Sprite method: how much relief comes from the sprite's painted "
+        "shading (lighter = higher). 0 = silhouette volume only.",
+    "fx_normal_pixel":
+        "Sprite method: the size of ONE original pixel in this image — 1 for "
+        "native pixel art, 4 for a x4 upscale. Every radius (volume reach, "
+        "smoothing) scales with it, so an upscale gets the same normals as "
+        "its native sprite instead of a thin edge and noisy detail.",
 
     "fx_strength":
         "Effect intensity multiplier. 1.0 = nominal, 0.0 = nearly off, "
@@ -2868,6 +2900,11 @@ class ParameterPanel(ctk.CTkScrollableFrame):
         except AttributeError:
             _screenfx_name = None
 
+        try:
+            _normal_name = _post_fx.EFFECT_NORMAL_MAP
+        except AttributeError:
+            _normal_name = None
+
         for slot in (1, 2, 3, 4, 5):
             # Each slot lives in its own transparent frame so that per-effect
             # extras always appear directly below the effect dropdown and can
@@ -3572,6 +3609,51 @@ class ParameterPanel(ctk.CTkScrollableFrame):
                 sc_method_row.pack(fill="x")
                 self.rows.append(sc_method_row)
 
+            # Normal Map extras — method, plus Sprite-only controls that hide
+            # when the Original method is picked.
+            normal_frame = None
+            if _normal_name is not None:
+                normal_frame = ctk.CTkFrame(slot_frame, fg_color="transparent")
+
+                nm_method_row = OptionRow(
+                    normal_frame, "Method", f"fx_normal_method_{slot}",
+                    self.params, list(_post_fx.NORMAL_METHODS),
+                    help_text=H["fx_normal_method"] if slot == 1 else None,
+                    on_change=self._fire,
+                )
+                nm_method_row.pack(fill="x")
+                self.rows.append(nm_method_row)
+
+                nm_sprite_box = ctk.CTkFrame(normal_frame, fg_color="transparent")
+                nm_format_row = OptionRow(
+                    nm_sprite_box, "Green channel", f"fx_normal_format_{slot}",
+                    self.params, list(_post_fx.NORMAL_FORMATS),
+                    help_text=H["fx_normal_format"] if slot == 1 else None,
+                    on_change=self._fire,
+                )
+                nm_format_row.pack(fill="x")
+                self.rows.append(nm_format_row)
+                for label, key, lo, hi, step, fmt in (
+                        ("Volume (silhouette)", "volume", 0.0, 8.0, 0.05, "{:.2f}"),
+                        ("Detail (shading)",    "detail", 0.0, 8.0, 0.1,  "{:.1f}"),
+                        ("Pixel size",          "pixel",  1,   16,  1,    "{:.0f}")):
+                    nm_row = SliderRow(
+                        nm_sprite_box, label, f"fx_normal_{key}_{slot}",
+                        self.params, lo, hi, step, fmt,
+                        help_text=H[f"fx_normal_{key}"] if slot == 1 else None,
+                        on_change=self._fire,
+                    )
+                    nm_row.pack(fill="x")
+                    self.rows.append(nm_row)
+
+                def _nm_vis(*_, mrow=nm_method_row, box=nm_sprite_box):
+                    if mrow.var.get().startswith("Original"):
+                        box.pack_forget()
+                    else:
+                        box.pack(fill="x")
+                nm_method_row.var.trace_add("write", lambda *a, f=_nm_vis: f())
+                _nm_vis()
+
             # Crosshatch extras — shown alongside strength for Unsharp/Bilateral
             crosshatch_frame = None
             if _unsharp_name is not None or _bilateral_name is not None:
@@ -3633,7 +3715,7 @@ class ParameterPanel(ctk.CTkScrollableFrame):
             # the effect dropdown changes. All frames are pack_forget'd and
             # re-packed in order each call so stacking order stays consistent.
             def _make_updater(erow, srow, tf, emf, grf, chf, frf, lmf, ptf,
-                              bvf, dhf, xhf, txf, wcf, scf,
+                              bvf, dhf, xhf, txf, wcf, scf, nmf,
                               ct=_colour_tint_name,
                               em=_emboss_name, gr=_granulate_name,
                               ch=_chrome_name, fr=_frosted_name,
@@ -3641,12 +3723,12 @@ class ParameterPanel(ctk.CTkScrollableFrame):
                               bv=_bevel_name, dh=_davehill_name,
                               us=_unsharp_name, bi=_bilateral_name,
                               tx=_texturize_name, wc=_watercolor_name,
-                              sc=_screenfx_name):
+                              sc=_screenfx_name, nm=_normal_name):
                 def _update(*_):
                     eff = erow.var.get()
                     srow.pack_forget()
                     for frame in (tf, emf, grf, chf, frf, lmf, ptf, bvf, dhf,
-                                  xhf, txf, wcf, scf):
+                                  xhf, txf, wcf, scf, nmf):
                         if frame is not None:
                             frame.pack_forget()
                     if eff not in (em, gr, ch, fr, lm, pt, bv, dh, tx, wc, sc):
@@ -3677,6 +3759,8 @@ class ParameterPanel(ctk.CTkScrollableFrame):
                         wcf.pack(fill="x")
                     if scf is not None and eff == sc:
                         scf.pack(fill="x")
+                    if nmf is not None and eff == nm:
+                        nmf.pack(fill="x")
                 return _update
 
             upd = _make_updater(
@@ -3685,6 +3769,7 @@ class ParameterPanel(ctk.CTkScrollableFrame):
                 frosted_frame, lomo_frame, paint_frame,
                 bevel_frame, davehill_frame, crosshatch_frame,
                 texturize_frame, watercolor_frame, screenfx_frame,
+                normal_frame,
             )
             effect_row.var.trace_add("write", lambda *a, u=upd: u())
             upd()   # set initial visibility

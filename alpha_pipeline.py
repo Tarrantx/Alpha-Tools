@@ -567,6 +567,11 @@ DEFAULT_PARAMS = {
     "fx_screenfx_color_1":        "#000000",
     "fx_screenfx_amount_1":       6.0,
     "fx_screenfx_method_1":       1,
+    "fx_normal_method_1":         "Sprite (alpha-aware)",  # | "Original (luminance)"
+    "fx_normal_format_1":         "OpenGL (Y+)",           # | "DirectX (Y−)" (Sprite only)
+    "fx_normal_volume_1":         1.15,
+    "fx_normal_detail_1":         6.0,
+    "fx_normal_pixel_1":          1.0,
     "fx_effect_2":                "None",
     "fx_strength_2":              1.0,
     "fx_color_2":                 "#0080FF",
@@ -639,6 +644,11 @@ DEFAULT_PARAMS = {
     "fx_screenfx_color_2":        "#000000",
     "fx_screenfx_amount_2":       6.0,
     "fx_screenfx_method_2":       1,
+    "fx_normal_method_2":         "Sprite (alpha-aware)",
+    "fx_normal_format_2":         "OpenGL (Y+)",
+    "fx_normal_volume_2":         1.15,
+    "fx_normal_detail_2":         6.0,
+    "fx_normal_pixel_2":          1.0,
     "fx_effect_3":                "None",
     "fx_strength_3":              1.0,
     "fx_color_3":                 "#0080FF",
@@ -711,6 +721,11 @@ DEFAULT_PARAMS = {
     "fx_screenfx_color_3":        "#000000",
     "fx_screenfx_amount_3":       6.0,
     "fx_screenfx_method_3":       1,
+    "fx_normal_method_3":         "Sprite (alpha-aware)",
+    "fx_normal_format_3":         "OpenGL (Y+)",
+    "fx_normal_volume_3":         1.15,
+    "fx_normal_detail_3":         6.0,
+    "fx_normal_pixel_3":          1.0,
     "fx_effect_4":                "None",
     "fx_strength_4":              1.0,
     "fx_color_4":                 "#0080FF",
@@ -783,6 +798,11 @@ DEFAULT_PARAMS = {
     "fx_screenfx_color_4":        "#000000",
     "fx_screenfx_amount_4":       6.0,
     "fx_screenfx_method_4":       1,
+    "fx_normal_method_4":         "Sprite (alpha-aware)",
+    "fx_normal_format_4":         "OpenGL (Y+)",
+    "fx_normal_volume_4":         1.15,
+    "fx_normal_detail_4":         6.0,
+    "fx_normal_pixel_4":          1.0,
     "fx_effect_5":                "None",
     "fx_strength_5":              1.0,
     "fx_color_5":                 "#0080FF",
@@ -855,6 +875,11 @@ DEFAULT_PARAMS = {
     "fx_screenfx_color_5":        "#000000",
     "fx_screenfx_amount_5":       6.0,
     "fx_screenfx_method_5":       1,
+    "fx_normal_method_5":         "Sprite (alpha-aware)",
+    "fx_normal_format_5":         "OpenGL (Y+)",
+    "fx_normal_volume_5":         1.15,
+    "fx_normal_detail_5":         6.0,
+    "fx_normal_pixel_5":          1.0,
     # Tile size for the post-processing chain. "Off" applies effects to the
     # whole image; "16×16" / "32×32" / ... applies the chain independently
     # to each NxN tile and stitches back. Useful for sprite-sheet / atlas
@@ -953,6 +978,11 @@ def _build_fx_chain(params: dict) -> list:
                 "screenfx_color":        str(params.get(f"fx_screenfx_color_{i}",   "#000000")),
                 "screenfx_amount":       float(params.get(f"fx_screenfx_amount_{i}",      6.0)),
                 "screenfx_method":       int(params.get(f"fx_screenfx_method_{i}",          1)),
+                "normal_method":         str(params.get(f"fx_normal_method_{i}", "Sprite (alpha-aware)")),
+                "normal_format":         str(params.get(f"fx_normal_format_{i}",  "OpenGL (Y+)")),
+                "normal_volume":         float(params.get(f"fx_normal_volume_{i}",         1.15)),
+                "normal_detail":         float(params.get(f"fx_normal_detail_{i}",          6.0)),
+                "normal_pixel":          float(params.get(f"fx_normal_pixel_{i}",           1.0)),
             }
             chain.append((eff, float(params.get(f"fx_strength_{i}", 1.0)), extras))
     return chain
@@ -2983,8 +3013,12 @@ def _roi_margin_align(params: dict) -> "tuple[int, int]":
     m = max(m, int(params.get("soften_edges", 0)))
     if str(params.get("clamp_mode", "none")) == "ps1":
         m = max(m, int(params.get("ps1_region_min", 0)) * 2)
-    if _build_fx_chain(params):
+    fx_chain = _build_fx_chain(params)
+    if fx_chain:
         m = max(m, 32)              # generous pad for fx pixel radii
+    if any(eff.startswith("Normal Map") and not x["normal_method"].startswith("Original")
+           for eff, _s, x in fx_chain):
+        m = max(m, 128)             # Sprite normals: silhouette distance reaches far in
     m = min(m, 128)                 # cap so the crop stays viewport-cheap
     factor = float(params.get("pixelate_factor", 1.0))
     align = max(1, int(round(factor))) if factor > 1 else 1

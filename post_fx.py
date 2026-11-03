@@ -85,10 +85,20 @@ TILE_SIZE_OPTIONS = {
 }
 
 
-def effect_strips_alpha(effect: str) -> bool:
-    """True for effects whose output is a different kind of image (normal map)
-    where reattaching the source alpha would be meaningless."""
-    return effect == EFFECT_NORMAL_MAP
+# Normal Map methods / green-channel conventions (per-slot extras).
+NORMAL_METHODS = ["Sprite (alpha-aware)", "Original (luminance)"]
+NORMAL_FORMATS = ["OpenGL (Y+)", "DirectX (Y−)"]
+
+
+def _normal_is_original(extras: "Optional[dict]") -> bool:
+    return str((extras or {}).get("normal_method", NORMAL_METHODS[0])).startswith("Original")
+
+
+def effect_strips_alpha(effect: str, extras: "Optional[dict]" = None) -> bool:
+    """True for effects whose output is a different kind of image where
+    reattaching the source alpha would be meaningless: the Original (luminance)
+    normal map. The Sprite normal map keeps the sprite's alpha."""
+    return effect == EFFECT_NORMAL_MAP and _normal_is_original(extras)
 
 
 def _bundled_dir() -> Optional[Path]:
@@ -791,9 +801,9 @@ def _normal_map(img: "Image.Image", strength: float) -> "Image.Image":
     strength scales the in-plane gradient magnitude — 1.0 nominal, 0.5
     subtle, 2.0 exaggerated relief.
 
-    Atlas-safe: the central-difference at the edge uses replicate padding
-    via numpy slicing, and when called from _upscale_single_tile the input
-    is already mirror-padded, so seams remain clean after the crop.
+    The central difference at the image edge uses replicate padding via numpy
+    slicing. This is the "Original (luminance)" Normal Map method; the default
+    "Sprite (alpha-aware)" method is _sprite_normal_map.
     """
     import numpy as np
 
@@ -826,6 +836,212 @@ def _normal_map(img: "Image.Image", strength: float) -> "Image.Image":
     b = np.clip((nz * 0.5 + 0.5) * 255.0, 0, 255).astype(np.uint8)
 
     return Image.fromarray(np.stack([r, g, b], axis=2), mode="RGB")
+
+
+# --- Sprite normal map (port of Sprite Fusion "Sprite Normals", MIT) --------
+
+_SRGB_TO_LINEAR = np.array(
+    [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+     for v in (np.arange(256) / 255.0)], np.float32)
+
+
+def _oklab_lightness(rgb: np.ndarray) -> np.ndarray:
+    """Oklab L of an HxWx3 uint8 sRGB array (perceptual lightness, 0-1)."""
+    lin = _SRGB_TO_LINEAR[rgb]
+    r, g, b = lin[..., 0], lin[..., 1], lin[..., 2]
+    l_ = np.cbrt(0.41222146 * r + 0.53633255 * g + 0.051445995 * b)
+    m_ = np.cbrt(0.2119035 * r + 0.6806995 * g + 0.10739696 * b)
+    s_ = np.cbrt(0.08830246 * r + 0.28171885 * g + 0.6299787 * b)
+    return 0.21045426 * l_ + 0.7936178 * m_ - 0.004072047 * s_
+
+
+def _gauss_zero(f: np.ndarray, sigma: float) -> np.ndarray:
+    """Separable Gaussian with ZERO extension (values outside are 0)."""
+    if sigma < 0.05:
+        return f.copy()
+    r = int(np.ceil(sigma * 3.0))
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    k = (k / k.sum()).astype(np.float32)
+    out = f
+    for axis in (1, 0):
+        src, acc = out, np.zeros_like(out)
+        n = src.shape[axis]
+        for off, wgt in zip(range(-r, r + 1), k):
+            s = min(abs(off), n)          # output i reads source i + off
+            if off < 0:
+                dst_sl, src_sl = slice(s, n), slice(0, n - s)
+            else:
+                dst_sl, src_sl = slice(0, n - s), slice(s, n)
+            if axis == 1:
+                acc[:, dst_sl] += wgt * src[:, src_sl]
+            else:
+                acc[dst_sl] += wgt * src[src_sl]
+        out = acc
+    return out
+
+
+def _masked_gauss(f: np.ndarray, weight: np.ndarray, sigma: float) -> np.ndarray:
+    """Weight-normalised Gaussian: pixels with weight 0 never contribute."""
+    return _gauss_zero(f * weight, sigma) / np.maximum(_gauss_zero(weight, sigma), 1e-8)
+
+
+def _edt(mask: np.ndarray) -> np.ndarray:
+    """Exact Euclidean distance from each True pixel to the nearest False
+    pixel (0 on False pixels; pixel-centre distances). Rows first (nearest
+    background in the row), then columns: d² = min over k of row_d²[y±k] + k²,
+    searching k outward only while k² can still beat the best so far."""
+    h, w = mask.shape
+    idx = np.arange(w, dtype=np.float64)
+    bg = ~mask
+    left = np.maximum.accumulate(np.where(bg, idx, -np.inf), axis=1)
+    right = np.minimum.accumulate(np.where(bg, idx, np.inf)[:, ::-1], axis=1)[:, ::-1]
+    g2 = np.minimum(idx - left, right - idx) ** 2
+    best = g2.ravel().copy()
+    act = np.flatnonzero(best > 1.0)
+    ys, xs = np.divmod(act, w)
+    k = 1
+    while act.size:
+        cand = np.full(act.size, np.inf)
+        up = ys >= k
+        cand[up] = g2[ys[up] - k, xs[up]]
+        dn = ys + k < h
+        cand[dn] = np.minimum(cand[dn], g2[ys[dn] + k, xs[dn]])
+        best[act] = np.minimum(best[act], cand + k * k)
+        k += 1
+        keep = best[act] > k * k
+        act, ys, xs = act[keep], ys[keep], xs[keep]
+    return np.sqrt(best).reshape(h, w)
+
+
+def _islands(mask: np.ndarray):
+    """8-connected components of `mask` (diagonal pixel-art strokes stay one
+    piece). Run-length union-find: runs per row, joined to touching runs in
+    the next row. Returns (labels HxW int32, -1 outside; [(y0, y1, x0, x1)])."""
+    h, w = mask.shape
+    labels = np.full((h, w), -1, np.int32)
+    edges = np.diff(np.pad(mask.astype(np.int8), ((0, 0), (1, 1))), axis=1)
+    ry, rs = np.nonzero(edges == 1)          # run starts (row-major)
+    re = np.nonzero(edges == -1)[1]          # matching run ends (exclusive)
+    if rs.size == 0:
+        return labels, []
+    parent = list(range(rs.size))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    rows = np.searchsorted(ry, np.arange(h + 1))
+    for y in range(h - 1):
+        a0, a1, b1 = rows[y], rows[y + 1], rows[y + 2]
+        if a0 == a1 or a1 == b1:
+            continue
+        # Run b (next row) touches run a when b.start <= a.end and a.start <= b.end.
+        lo = np.searchsorted(re[a1:b1], rs[a0:a1], side="left")
+        hi = np.searchsorted(rs[a1:b1], re[a0:a1], side="right")
+        for i in np.flatnonzero(hi > lo):
+            ra = find(a0 + i)
+            for j in range(a1 + lo[i], a1 + hi[i]):
+                rb = find(j)
+                if rb != ra:
+                    parent[rb] = ra
+    _, run_label = np.unique([find(i) for i in range(rs.size)], return_inverse=True)
+    n = int(run_label.max()) + 1
+    lengths = re - rs
+    starts = ry * w + rs
+    pos = np.arange(lengths.sum()) + np.repeat(starts - (np.cumsum(lengths) - lengths), lengths)
+    labels.ravel()[pos] = np.repeat(run_label, lengths)
+    y0 = np.full(n, h); y1 = np.zeros(n, int); x0 = np.full(n, w); x1 = np.zeros(n, int)
+    np.minimum.at(y0, run_label, ry); np.maximum.at(y1, run_label, ry + 1)
+    np.minimum.at(x0, run_label, rs); np.maximum.at(x1, run_label, re)
+    return labels, list(zip(y0.tolist(), y1.tolist(), x0.tolist(), x1.tolist()))
+
+
+def _sobel(f: np.ndarray):
+    """Normalised 3x3 Sobel slopes (x right, y down); 0 on the 1-px border."""
+    dx = np.zeros_like(f)
+    dy = np.zeros_like(f)
+    dx[1:-1, 1:-1] = (f[:-2, 2:] + 2 * f[1:-1, 2:] + f[2:, 2:]
+                      - f[:-2, :-2] - 2 * f[1:-1, :-2] - f[2:, :-2]) * 0.125
+    dy[1:-1, 1:-1] = (f[2:, :-2] + 2 * f[2:, 1:-1] + f[2:, 2:]
+                      - f[:-2, :-2] - 2 * f[:-2, 1:-1] - f[:-2, 2:]) * 0.125
+    return dx, dy
+
+
+def _sprite_normal_map(
+    img: "Image.Image",
+    alpha: "Optional[Image.Image]" = None,
+    strength: float = 1.0,
+    fmt: str = NORMAL_FORMATS[0],
+    volume: float = 1.15,
+    detail: float = 6.0,
+    pixel_size: float = 1.0,
+) -> "Image.Image":
+    """Tangent-space normal map for sprites (port of Sprite Fusion's "Sprite
+    Normals", MIT). Height = a rounded "pillow" rising from the silhouette
+    (exact distance to the nearest transparent pixel through a log curve, so
+    even a flat-colour sprite gets volume) + the sprite's own shading (Oklab
+    lightness, opacity-weighted blur, so the RGB under transparent pixels never
+    counts). Slopes by 3x3 Sobel. Each 8-connected island is processed on its
+    own, so neighbouring sprites on a page don't bleed into each other.
+
+    Pixels with alpha <= 3% get the flat normal (128,128,255). The alpha is
+    kept: returns RGBA when `alpha` is given, else RGB (treated as opaque).
+
+    strength 1.0 = Sprite Normals' default (normal strength 1.5); volume =
+    silhouette relief; detail = shading relief; fmt picks the green channel
+    (OpenGL Y+ for Godot / Unity / Blender, DirectX Y− for Unreal).
+    pixel_size = size of one original pixel in this image (4 for a x4
+    upscale): every radius scales with it and the result matches the native
+    sprite's normals.
+    """
+    rgb = np.asarray(img.convert("RGB"))
+    h, w = rgb.shape[:2]
+    a8 = (np.asarray(alpha.convert("L")) if alpha is not None
+          else np.full((h, w), 255, np.uint8))
+    p = max(1.0, float(pixel_size))
+    radius, soft, dscale = 4.0 * p, 1.15 * p, 0.6 * p
+    pad = int(np.ceil(3.0 * max(soft, 2.0 * dscale))) + 3
+    ns = 1.5 * max(0.0, float(strength))
+    y_sign = -1.0 if fmt.startswith("DirectX") else 1.0
+
+    mask = a8 > 0.03 * 255.0
+    light = _oklab_lightness(rgb)
+    opac = a8.astype(np.float32) / 255.0
+    out = np.empty((h, w, 4), np.uint8)
+    out[..., 0], out[..., 1], out[..., 2], out[..., 3] = 128, 128, 255, a8
+    labels, boxes = _islands(mask)
+    for k, (y0, y1, x0, x1) in enumerate(boxes):
+        isl = labels[y0:y1, x0:x1] == k
+        shape = (y1 - y0 + 2 * pad, x1 - x0 + 2 * pad)
+        inner = (slice(pad, pad + y1 - y0), slice(pad, pad + x1 - x0))
+        m = np.zeros(shape, bool)
+        m[inner] = isl
+        op = np.zeros(shape, np.float32)
+        op[inner] = np.where(isl, opac[y0:y1, x0:x1], 0.0)
+        lt = np.zeros(shape, np.float32)
+        vals = light[y0:y1, x0:x1][isl]
+        # A constant height has no slope; centring just avoids float noise.
+        lt[inner] = np.where(isl, light[y0:y1, x0:x1] - (vals.min() + vals.max()) * 0.5, 0.0)
+
+        inset = np.maximum(_edt(m) - 0.5, 0.0)
+        height = _gauss_zero((volume * radius * np.log1p(inset / radius)).astype(np.float32), soft)
+        fine = _masked_gauss(lt, op, dscale)
+        broad = _masked_gauss(lt, op, 2.0 * dscale)
+        # Shading slopes per pixel shrink by 1/p at x p, so scale detail by p.
+        height += (detail * p) * (0.7 * fine + 0.3 * broad)
+
+        dx, dy = _sobel(height)
+        nx, ny = -dx[m] * ns, dy[m] * ns * y_sign
+        inv = 1.0 / np.sqrt(nx * nx + ny * ny + 1.0)
+        enc = np.floor((np.stack([nx * inv, ny * inv, inv], -1) * 0.5 + 0.5) * 255.0 + 0.5)
+        region = out[y0:y1, x0:x1, :3]
+        region[isl] = np.clip(enc, 0, 255).astype(np.uint8)
+
+    if alpha is None:
+        return Image.fromarray(np.ascontiguousarray(out[..., :3]), "RGB")
+    return Image.fromarray(out, "RGBA")
 
 
 # --- Texturize (Fred Weinhaus texturize port) -----------------------------
@@ -1154,7 +1370,7 @@ def apply_effect_chain(
     tile is processed in isolation — a convolution kernel near a tile edge
     sees only that tile's pixels, not the neighbours.
 
-    If a normal-map (or any other alpha-stripping) effect appears in the
+    If an alpha-stripping effect (the Original normal map) appears in the
     chain, the result is RGB from that point on — callers should check
     effect_strips_alpha on each entry if they need to suppress alpha
     reattachment downstream."""
@@ -1164,19 +1380,23 @@ def apply_effect_chain(
         return _apply_chain_inplace(img, chain, alpha)
     # Tiled mode can't sensibly bevel per-tile (it would bevel each tile's
     # edge), so the alpha-aware path is skipped there — the bevel no-ops.
-    return _apply_chain_tiled(img, chain, tile_size)
+    # Only the Sprite normal map gets each tile's alpha (one frame per tile).
+    return _apply_chain_tiled(img, chain, tile_size, alpha)
 
 
 def _apply_chain_inplace(
     img: Image.Image,
     chain: "list",
     alpha: "Optional[Image.Image]" = None,
+    normal_alpha: "Optional[Image.Image]" = None,
 ) -> Image.Image:
     """Walk the chain and accumulate effects on one image. `alpha` (the shape)
     is threaded to alpha-aware effects (Bevel); an effect that returns RGBA
     updates the carried alpha for later steps. Returns RGBA carrying the final
     alpha when one is in play (the bevel may have expanded it), else RGB.
-    Chain items may be (effect, strength) or (effect, strength, extras_dict)."""
+    `normal_alpha` is the shape given to the Normal Map only, when no `alpha`
+    is threaded (tiled mode). Chain items may be (effect, strength) or
+    (effect, strength, extras_dict)."""
     result = img.convert("RGB") if img.mode == "RGBA" else img
     cur_alpha = alpha
     for item in chain:
@@ -1184,8 +1404,11 @@ def _apply_chain_inplace(
         extras = item[2] if len(item) > 2 else {}
         if not effect or effect == EFFECT_NONE:
             continue
-        out = apply_effect(result, effect, strength, alpha=cur_alpha, **extras)
-        if effect_strips_alpha(effect):
+        eff_alpha = cur_alpha
+        if effect == EFFECT_NORMAL_MAP and eff_alpha is None:
+            eff_alpha = normal_alpha
+        out = apply_effect(result, effect, strength, alpha=eff_alpha, **extras)
+        if effect_strips_alpha(effect, extras):
             cur_alpha = None
             result = out.convert("RGB") if out.mode != "RGB" else out
         elif out.mode == "RGBA":
@@ -1203,17 +1426,22 @@ def _apply_chain_tiled(
     img: Image.Image,
     chain: "list[tuple[str, float]]",
     tile_size: int,
+    alpha: "Optional[Image.Image]" = None,
 ) -> Image.Image:
     """Slice into tile_size×tile_size blocks, run the chain on each tile in
     isolation, stitch results back together. Tile origin is (0, 0); edge
-    tiles are clipped if the image doesn't divide evenly."""
+    tiles are clipped if the image doesn't divide evenly. `alpha` reaches the
+    Sprite normal map only (as each tile's own alpha)."""
     w, h = img.size
+
+    def run(box):
+        tile_alpha = alpha.crop(box) if alpha is not None else None
+        return _apply_chain_inplace(img.crop(box), chain, normal_alpha=tile_alpha)
+
     # Run the first tile up front to discover the output mode (e.g. the
-    # chain might strip alpha via a Normal Map step — the canvas needs
-    # to be RGB rather than RGBA).
-    first_w = min(tile_size, w)
-    first_h = min(tile_size, h)
-    first_out = _apply_chain_inplace(img.crop((0, 0, first_w, first_h)), chain)
+    # chain might strip alpha via an Original Normal Map step — the canvas
+    # needs to be RGB rather than RGBA).
+    first_out = run((0, 0, min(tile_size, w), min(tile_size, h)))
     canvas = Image.new(first_out.mode, (w, h))
     canvas.paste(first_out, (0, 0))
 
@@ -1223,16 +1451,16 @@ def _apply_chain_tiled(
                 continue
             x1 = min(x0 + tile_size, w)
             y1 = min(y0 + tile_size, h)
-            tile = img.crop((x0, y0, x1, y1))
-            canvas.paste(_apply_chain_inplace(tile, chain), (x0, y0))
+            canvas.paste(run((x0, y0, x1, y1)), (x0, y0))
     return canvas
 
 
 def chain_strips_alpha(chain: "list") -> bool:
-    """True if any effect in the chain strips alpha (e.g. Normal Map)."""
+    """True if any effect in the chain strips alpha (the Original normal map)."""
     if not chain:
         return False
-    return any(effect_strips_alpha(item[0]) for item in chain)
+    return any(effect_strips_alpha(item[0], item[2] if len(item) > 2 else None)
+               for item in chain)
 
 
 def _chrome_fx(
@@ -1543,7 +1771,15 @@ def apply_effect(
 
     # Python-implemented effects (no magick.exe needed)
     if effect == EFFECT_NORMAL_MAP:
-        return _normal_map(img, strength)
+        if _normal_is_original(extras):
+            return _normal_map(img, strength)
+        return _sprite_normal_map(
+            img, alpha, strength,
+            fmt=str(extras.get("normal_format", NORMAL_FORMATS[0])),
+            volume=float(extras.get("normal_volume", 1.15)),
+            detail=float(extras.get("normal_detail", 6.0)),
+            pixel_size=float(extras.get("normal_pixel", 1.0)),
+        )
     if effect == EFFECT_COLOUR_TINT:
         return _colour_tint(
             img,
