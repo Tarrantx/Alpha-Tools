@@ -43,7 +43,7 @@ ctk.set_default_color_theme("blue")
 # --- Constants -------------------------------------------------------------
 
 APP_TITLE = "Alpha Tools"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 PREVIEW_MAX_DIM = 1024
 PREVIEW_DEBOUNCE_MS = 200
 SUPPORTED_INPUTS = (

@@ -72,8 +72,15 @@ def patch_imagemagick_delegates(src_xml: Path) -> Path:
 
 APP_NAME = "Alpha Tools"
 DIST_NAME = "Alpha-Tools"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 # Version history (most recent first):
+#   1.2.0 — preview viewport rendering + ROI full-res detail; perceptual
+#           OKLCh tone stage; manual pixel edits (pencil / eraser / picker /
+#           granulate / smudge, sidecars, batch "Include manual edits");
+#           "Protect vivid colours" for colour-depth reduction; soften-edge
+#           dither; pixelate "Majority vote" block colour; Batch pixel-exact
+#           power-of-two output scale. Fixes: grid overlay on large images,
+#           preset save with live edits, quantise transparent base colour.
 #   1.1.0 — promoted the former "Code-Review" line to be the main version
 #           (the 1.0.x source was retired/archived). Headline addition:
 #           incongruence-based alpha edge refinement that removes dark
