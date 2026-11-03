@@ -27,7 +27,7 @@ It has a live **Tune** tab (single image, side‑by‑side before/after with zoo
 **Finishing**
 - **Pixelate** (fractional factors), with each block coloured by its **centre pixel** or by **majority vote** (the block's dominant colour — robust to upscaler noise, never invents colours or alpha values), and **soften edges** (alpha‑outline blur, RGB only), with an optional **dither** on top of the blur — a zero‑mean speckle confined to the same softened band, to break up the smooth gradient.
 - Output **colour depth / palette**: reduce via libimagequant, with **dithering** (rendered at pixel‑art block resolution) and **custom‑palette matching** to any reference image. **Protect vivid colours** reserves palette slots for small saturated accents (e.g. red eyes on a grey body) so they survive aggressive reduction instead of merging into the dominant range. Reducing colour depth **preserves the transparent base colour** (black / white / whatever it is) instead of leaving an arbitrary fringe.
-- A 5‑slot **post‑processing effects chain**: unsharp, bilateral smooth, saturation boost, emboss, chrome, bevel, Dave Hill, texturize, watercolor, screen effects (mesh / displace), colour tint, film grain, frosted glass, lomo, oil paint, granulate, turbulence, normal map, CRT scanlines.
+- A 5‑slot **post‑processing effects chain**: unsharp, bilateral smooth, saturation boost, emboss, chrome, bevel, Dave Hill, texturize, watercolor, screen effects (mesh / displace), colour tint, film grain, frosted glass, lomo, oil paint, granulate, turbulence, normal map, CRT scanlines. The **normal map** defaults to an alpha‑aware **Sprite** method (rounded volume from the silhouette + the sprite's shading, transparency ignored and kept, each piece processed on its own, OpenGL or DirectX green, a pixel‑size setting for upscales); the **Original** luminance method stays selectable for opaque / tiling textures.
 
 **Preview (Tune tab)**
 - Live before/after with linked zoom/pan and a cursor pixel readout (source x/y + RGBA under the mouse). Wheel or **Ctrl +/‑** to zoom (about the viewport centre), left‑ or right‑drag to pan.
@@ -63,6 +63,7 @@ The build bundles a portable ImageMagick — `setup.py` expects it at the path s
 ## Credits
 
 - Many of the post‑processing effects and colour operations are ports / reimplementations of **Fred Weinhaus's** ImageMagick scripts — <http://www.fmwconcepts.com/imagemagick/> (fuzzythresh, rangethresh, bevel, chrome, emboss, texturize, watercolor, screeneffects, levelcolors, Dave Hill effect).
+- The Sprite normal‑map method is a port of [Sprite Fusion Sprite Normals](https://github.com/Hugo-Dz/spritefusion-sprite-normals) by Hugo Duprez (MIT).
 - Palette reduction + dithering approach inspired by [sd‑webui‑pixelart](https://github.com/mrreplicart/sd-webui-pixelart).
 - Colour reduction via [libimagequant / pngquant](https://pngquant.org/lib/); vectoriser via [vtracer](https://github.com/visioncortex/vtracer); effects via [ImageMagick](https://imagemagick.org/).
 
