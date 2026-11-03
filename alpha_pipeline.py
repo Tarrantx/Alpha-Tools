@@ -467,6 +467,8 @@ DEFAULT_PARAMS = {
 
     # Stylise
     "pixelate_factor":            1.0,   # 1 = off; N = ~NxN blocks. Fractional (1.5) = milder
+    "pixelate_block_colour":      "Centre sample",  # | "Majority vote" (PIXELATE_BLOCK_COLOURS)
+    "pixelate_vote_tolerance":    32,    # RGBA distance counted as "same colour" in a vote
     "soften_edges":               0,     # px Gaussian blur of RGB along the alpha outline; 0 = off
     "soften_dither":              False, # add a dither on top of the soften-edge blur (same band)
     "soften_dither_strength":     40,    # 0-100 dither amount within the soften band
@@ -862,6 +864,11 @@ DEFAULT_PARAMS = {
     # DDS export compression (only used when output_path has a .dds suffix).
     # 'dxt1' = BC1 (RGB, no/1-bit alpha); 'dxt5' = BC3 (RGBA, full alpha).
     "dds_compression":            "dxt5",
+
+    # Output scale, applied to the finished image just before saving. Set per
+    # task by the Batch tab (1.0 = off); power of two, < 1 downscales.
+    "output_scale":               1.0,
+    "output_scale_down":          "Majority vote",  # | "Centre sample" (downscale block colour)
 }
 
 
@@ -1951,8 +1958,15 @@ def perceptual_oklch(rgb: Image.Image, params: dict,
 
 # --- Stage 6b: Pixelate ----------------------------------------------------
 
+# How pixelate picks each block's colour. "Centre sample" is the original
+# nearest-neighbour behaviour; "Majority vote" uses the block's dominant colour.
+PIXELATE_BLOCK_COLOURS = ["Centre sample", "Majority vote"]
+
+
 def pixelate(rgba: Image.Image, factor: float,
-             block: "Optional[tuple]" = None) -> Image.Image:
+             block: "Optional[tuple]" = None,
+             block_colour: str = "Centre sample",
+             tolerance: float = 32.0) -> Image.Image:
     """Re-pixelate an upscaled texture: downsample by `factor` then upsample
     back to original size, both with nearest-neighbour. factor<=1 is a no-op.
 
@@ -1970,6 +1984,11 @@ def pixelate(rgba: Image.Image, factor: float,
     Operates on the composed RGBA so RGB and alpha are pixelated together
     — otherwise you get pixelated colour with smooth alpha edges (or vice
     versa), which looks wrong.
+
+    `block_colour` = "Majority vote" fills each block with its dominant colour
+    (see _pixelate_vote) instead of the single pixel nearest its centre, so one
+    noisy or anti-aliased centre pixel can't decide the whole block. Same block
+    grid either way.
     """
     if factor <= 1:
         return rgba
@@ -1980,8 +1999,166 @@ def pixelate(rgba: Image.Image, factor: float,
     else:
         sw = max(1, int(round(w / factor)))
         sh = max(1, int(round(h / factor)))
+    if block_colour == "Majority vote":
+        return _pixelate_vote(rgba, sw, sh, tolerance)
     small = rgba.resize((sw, sh), resample=Image.Resampling.NEAREST)
     return small.resize((w, h), resample=Image.Resampling.NEAREST)
+
+
+def _nearest_block_index(n: int, sn: int) -> np.ndarray:
+    """Which of `sn` blocks each of `n` full-res positions belongs to, read off
+    PIL's own NEAREST upscale (sn -> n) so vote blocks land exactly where the
+    centre-sample blocks do, fractional factors included."""
+    ramp = Image.fromarray(np.arange(sn, dtype=np.int32).reshape(1, sn))
+    return np.asarray(ramp.resize((n, 1), Image.Resampling.NEAREST), np.int64)[0]
+
+
+def _vote_candidates(bsize: np.ndarray, pmax: int, per_axis: int = 4) -> np.ndarray:
+    """In-block offsets (one axis) of the pixels that may WIN a vote. Up to
+    `per_axis` blocks wide that's every position; wider blocks use a spread
+    subset (stride through the block centre) so the cost stays flat at large
+    factors. Every pixel still votes — this only limits who can win."""
+    bmin = max(1, int(bsize.min()))
+    s = -(-bmin // per_axis)
+    if s <= 1:
+        return np.arange(pmax)
+    return np.arange((bmin // 2) % s, bmin, s)
+
+
+def _pixelate_vote(rgba: Image.Image, sw: int, sh: int,
+                   tolerance: float) -> Image.Image:
+    """Pixelate onto the sw x sh block grid (the same blocks Centre sample
+    uses), filling each block with its majority colour (_vote_winners)."""
+    mode = rgba.mode
+    arr = np.asarray(rgba.convert("RGBA"))
+    h, w = arr.shape[:2]
+    cy = _nearest_block_index(h, sh)
+    cx = _nearest_block_index(w, sw)
+    wy, wx = _vote_winners(arr, cy, cx, sh, sw, tolerance)
+    out = Image.fromarray(arr[wy, wx][cy[:, None], cx[None, :]], "RGBA")
+    return out if mode == "RGBA" else out.convert(mode)
+
+
+def _vote_winners(arr: np.ndarray, cy: np.ndarray, cx: np.ndarray,
+                  sh: int, sw: int, tolerance: float):
+    """MAJORITY-vote winner of every block: returns (wy, wx), each sh x sw, the
+    source row / column of the winning pixel. `arr` is HxWx4 RGBA; cy / cx give
+    each row's / column's block index (non-decreasing, contiguous runs).
+
+    Each candidate pixel scores how many of its block's pixels sit within
+    `tolerance` of it (an Epanechnikov kernel, so closer counts more) and the
+    top scorer wins. Candidates are every pixel up to 4 px blocks, a spread 4x4
+    subset beyond (_vote_candidates).
+
+    Distances are on premultiplied RGBA, so all fully-transparent pixels vote
+    together whatever junk RGB sits under them. The winner is a real pixel of
+    the block, so no new colour or alpha value is invented (PS1 0/127/255 alpha
+    survives). A tie (no majority) goes to the candidate nearest the block
+    centre — the same pixel Centre sample would take."""
+    h, w = arr.shape[:2]
+
+    # Blocks are contiguous runs of cy / cx; pad each to the largest so they
+    # stack into one array, with a validity mask over the padding.
+    bh = np.bincount(cy, minlength=sh)
+    bw = np.bincount(cx, minlength=sw)
+    ph, pw = int(bh.max()), int(bw.max())
+    ys = np.minimum(np.searchsorted(cy, np.arange(sh))[:, None] + np.arange(ph), h - 1)
+    xs = np.minimum(np.searchsorted(cx, np.arange(sw))[:, None] + np.arange(pw), w - 1)
+    vy = np.arange(ph)[None, :] < bh[:, None]
+    vx = np.arange(pw)[None, :] < bw[:, None]
+    oy, ox = _vote_candidates(bh, ph), _vote_candidates(bw, pw)
+    # Tie-break rank: squared distance from the block centre.
+    ry = (oy[None, :] - bh[:, None] / 2.0) ** 2
+    rx = (ox[None, :] - bw[:, None] / 2.0) ** 2
+
+    alpha = arr[..., 3:4].astype(np.float32)
+    feat = np.concatenate([arr[..., :3] * (alpha / 255.0), alpha], axis=-1)
+    tol2 = np.float32(float(tolerance) ** 2)
+    P, C = ph * pw, len(oy) * len(ox)
+    wy = np.empty((sh, sw), np.int64)
+    wx = np.empty((sh, sw), np.int64)
+    rows = max(1, 250_000 // (sw * C * P))       # block rows per chunk (cache-sized)
+    for r0 in range(0, sh, rows):
+        r1 = min(sh, r0 + rows)
+        nb = (r1 - r0) * sw
+        f = feat[ys[r0:r1, None, :, None], xs[None, :, None, :]].reshape(nb, P, 4)
+        valid = (vy[r0:r1, None, :, None] & vx[None, :, None, :]).reshape(nb, P)
+        f[~valid] = 1e5                          # padding: never within tolerance
+        cyy = ys[r0:r1][:, oy][:, None, :, None]
+        cxx = xs[:, ox][None, :, None, :]
+        fc = feat[cyy, cxx].reshape(nb, C, 4)
+        cvalid = (vy[r0:r1][:, oy][:, None, :, None]
+                  & vx[:, ox][None, :, None, :]).reshape(nb, C)
+        d2 = np.zeros((nb, C, P), np.float32)
+        tmp = np.empty_like(d2)
+        for c in range(4):
+            np.subtract(fc[:, :, None, c], f[:, None, :, c], out=tmp)
+            np.multiply(tmp, tmp, out=tmp)
+            d2 += tmp
+        np.subtract(tol2, d2, out=d2)
+        np.maximum(d2, 0.0, out=d2)
+        score = d2.sum(-1)
+        score[~cvalid] = -1.0
+        top = score >= score.max(-1, keepdims=True) - 1e-3 * tol2
+        rank = (ry[r0:r1, None, :, None] + rx[None, :, None, :]).reshape(nb, C)
+        win = np.where(top, rank, np.inf).argmin(-1)
+        shape = (r1 - r0, sw, len(oy), len(ox))
+        pick = np.arange(nb)
+        wy[r0:r1] = np.broadcast_to(cyy, shape).reshape(nb, C)[pick, win].reshape(r1 - r0, sw)
+        wx[r0:r1] = np.broadcast_to(cxx, shape).reshape(nb, C)[pick, win].reshape(r1 - r0, sw)
+    return wy, wx
+
+
+# --- Output scale (Batch) --------------------------------------------------
+
+# Power-of-two output scales offered by the Batch tab, as (label, factor).
+OUTPUT_SCALES = [
+    ("1/8×", 0.125), ("1/4×", 0.25), ("1/2×", 0.5), ("1× (off)", 1.0),
+    ("2×", 2.0), ("4×", 4.0), ("8×", 8.0),
+]
+OUTPUT_SCALE_LABELS = [label for label, _ in OUTPUT_SCALES]
+
+
+def scale_pow2(img: Image.Image, scale: float,
+               down_colour: str = "Majority vote",
+               tolerance: float = 32.0) -> Image.Image:
+    """Pixel-exact power-of-two rescale of a finished image. No interpolation:
+    every output pixel is a copy of a source pixel, so hard pixel edges, an
+    indexed ('P') image's palette and PS1 0/127/255 alpha all survive.
+
+    Up (2/4/8x): each pixel becomes a k x k block (nearest-neighbour).
+    Down (1/2, 1/4, 1/8): each k x k block of a grid anchored at (0,0) becomes
+    one pixel — its majority colour (_vote_winners) or its centre pixel, per
+    `down_colour`. A size that doesn't divide by k rounds UP: the edge blocks
+    are padded by repeating the edge pixels, so nothing is cropped.
+    """
+    k = scale if scale >= 1 else 1.0 / scale
+    if k != int(k) or int(k) & (int(k) - 1):
+        raise ValueError(f"output scale {scale} is not a power of two")
+    k = int(k)
+    if k == 1:
+        return img
+    w, h = img.size
+    if scale > 1:
+        return img.resize((w * k, h * k), resample=Image.Resampling.NEAREST)
+
+    src = img if img.mode in ("RGBA", "RGB", "LA", "L", "P") else img.convert("RGBA")
+    sw, sh = -(-w // k), -(-h // k)
+    ry = np.minimum(np.arange(sh * k), h - 1)    # edge-repeat padding to whole blocks
+    rx = np.minimum(np.arange(sw * k), w - 1)
+    if down_colour == "Majority vote":
+        rgba = np.asarray(src.convert("RGBA"))[ry][:, rx]
+        wy, wx = _vote_winners(rgba, np.arange(sh * k) // k, np.arange(sw * k) // k,
+                               sh, sw, tolerance)
+    else:
+        wy, wx = np.meshgrid(np.arange(sh) * k + k // 2, np.arange(sw) * k + k // 2,
+                             indexing="ij")
+    picked = np.asarray(src)[ry[wy], rx[wx]]
+    # Resize only to get an sw x sh image of the same mode + palette, then
+    # overwrite its pixels with the picked ones (P stays indexed, untouched).
+    small = src.resize((sw, sh), resample=Image.Resampling.NEAREST)
+    small.frombytes(np.ascontiguousarray(picked).tobytes())
+    return small
 
 
 def _edge_dither_noise(h: int, w: int, origin) -> np.ndarray:
@@ -2496,7 +2673,10 @@ def _stage_pixelate(out: Image.Image, params: dict) -> Image.Image:
     # Last spatial step — affects RGB + alpha together so edges stay aligned.
     if float(params["pixelate_factor"]) > 1:
         block = (params.get("_roi_ctx") or {}).get("pixelate_block")
-        return pixelate(out, float(params["pixelate_factor"]), block=block)
+        return pixelate(
+            out, float(params["pixelate_factor"]), block=block,
+            block_colour=str(params.get("pixelate_block_colour", "Centre sample")),
+            tolerance=float(params.get("pixelate_vote_tolerance", 32)))
     return out
 
 
@@ -2697,6 +2877,10 @@ def process_image(input_path,
     with _maybe_tempdir(work_dir) as tmp:
         img = load_rgba(input_path)
         out = process_pil(img, params, work_dir=tmp)
+        out = scale_pow2(
+            out, float(params.get("output_scale", 1.0)),
+            str(params.get("output_scale_down", "Majority vote")),
+            float(params.get("pixelate_vote_tolerance", 32)))
 
         # Save
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3065,7 +3249,9 @@ class PreviewPipeline:
             s.out = _stage_compose(s.rgb, s.work_alpha)
 
         def k_pix(p, t):
-            return (p["pixelate_factor"],)
+            vote = p.get("pixelate_block_colour", "Centre sample") == "Majority vote"
+            return (p["pixelate_factor"], vote,
+                    p.get("pixelate_vote_tolerance", 32) if vote else None)
 
         def r_pix(s, p, tmp):
             s.out = _stage_pixelate(s.out, p)

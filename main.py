@@ -381,6 +381,26 @@ HELP_TEXT = {
         "Fractional factors (1.25, 1.5, 1.75) give a milder effect than the "
         "next whole step — use them when factor 2 is already too blocky. "
         "Affects RGB and alpha together so edges stay aligned.",
+    "pixelate_block_colour":
+        "How each pixelate block gets its colour.\n\n"
+        "  Centre sample — the one pixel nearest the block centre (plain "
+        "nearest-neighbour; the original behaviour). Fast, but a single noisy "
+        "or anti-aliased centre pixel decides the whole block.\n"
+        "  Majority vote — the block's dominant colour: each pixel counts how "
+        "many of the block's pixels are within Vote tolerance of it, and the "
+        "best-supported one wins. More robust on noisy upscales.\n\n"
+        "Either way the result is a real pixel from the block — no new colours "
+        "or alpha values are invented, so PS1 0/127/255 alpha survives. "
+        "Fully transparent pixels vote together whatever RGB sits under them. "
+        "Same block grid in both modes. Majority vote costs roughly 0.3 s per "
+        "megapixel; Centre sample is near-instant.",
+    "pixelate_vote_tolerance":
+        "Majority vote only: how close two pixels' colours (RGBA, 0–255 "
+        "units) must be to count as the same colour; closer counts more. Too "
+        "low and upscaler noise splits the vote (falls back to the centre "
+        "pixel); too high and distinct colours merge, so the largest area wins "
+        "and small details are lost. Around 32 (the default) suits ESRGAN "
+        "upscales.",
 
     "soften_edges":
         "Gaussian-blur the COLOUR (RGB) in a band along the texture's outline "
@@ -2573,6 +2593,35 @@ class ParameterPanel(ctk.CTkScrollableFrame):
             help_text=H["pixelate_factor"], on_change=self._fire,
         ))
         self.rows[-1].pack(fill="x")
+
+        # Block colour: centre sample (nearest) or majority vote, with the vote
+        # tolerance shown only for majority vote.
+        block_section = ctk.CTkFrame(self, fg_color="transparent")
+        block_section.pack(fill="x")
+        block_row = OptionRow(
+            block_section, "Block colour", "pixelate_block_colour", self.params,
+            list(pipeline.PIXELATE_BLOCK_COLOURS),
+            help_text=H["pixelate_block_colour"], on_change=self._fire,
+        )
+        block_row.pack(fill="x")
+        self.rows.append(block_row)
+        vote_box = ctk.CTkFrame(block_section, fg_color="transparent")
+        tol_row = SliderRow(
+            vote_box, "Vote tolerance", "pixelate_vote_tolerance",
+            self.params, 1, 128, 1, "{:.0f}",
+            help_text=H["pixelate_vote_tolerance"], on_change=self._fire,
+        )
+        tol_row.pack(fill="x")
+        self.rows.append(tol_row)
+
+        def _update_vote_vis(*_):
+            if block_row.var.get() == "Majority vote":
+                vote_box.pack(fill="x")
+            else:
+                vote_box.pack_forget()
+        block_row.var.trace_add("write", lambda *a: _update_vote_vis())
+        _update_vote_vis()
+
         self.rows.append(SliderRow(
             self, "Soften edges (px, 0 = off)", "soften_edges",
             self.params, 0, 20, 1, "{:.0f}",
@@ -4879,7 +4928,7 @@ class BatchTab(ctk.CTkFrame):
             row, text="Auto-pick preset per file (overrides dropdown)",
             variable=self.autopick_var,
         )
-        autopick_cb.grid(row=1, column=1, columnspan=4, sticky="w", padx=6, pady=(4, 0))
+        autopick_cb.grid(row=1, column=1, columnspan=3, sticky="w", padx=6, pady=(4, 0))
         _Tooltip(autopick_cb,
                  "Per-file alpha-histogram classifier. For each input the "
                  "batch checks the alpha plane and picks:\n"
@@ -4896,7 +4945,7 @@ class BatchTab(ctk.CTkFrame):
             row, text="Skip files already present in the output folder",
             variable=self.skip_existing_var,
         )
-        skip_cb.grid(row=2, column=1, columnspan=4, sticky="w", padx=6, pady=(4, 0))
+        skip_cb.grid(row=2, column=1, columnspan=3, sticky="w", padx=6, pady=(4, 0))
         _Tooltip(skip_cb,
                  "When ticked, any input whose output file already exists is "
                  "left untouched (logged as SKIP) instead of being "
@@ -4909,7 +4958,7 @@ class BatchTab(ctk.CTkFrame):
             row, text="Include manual edits (from the Tune tab)",
             variable=self.include_edits_var,
         )
-        edits_cb.grid(row=3, column=1, columnspan=4, sticky="w", padx=6, pady=(4, 0))
+        edits_cb.grid(row=3, column=1, columnspan=3, sticky="w", padx=6, pady=(4, 0))
         _Tooltip(edits_cb,
                  "Apply the manual pixel edits currently painted on the Tune tab "
                  "to every file, at the SAME x,y coordinates (no scaling). For "
@@ -4922,6 +4971,43 @@ class BatchTab(ctk.CTkFrame):
         ctk.CTkOptionMenu(row, variable=self.output_format_var,
                           values=OUTPUT_FORMATS, width=130
                           ).grid(row=0, column=5)
+
+        # Output scale (power of two, pixel-exact) and how a downscale picks
+        # each block's colour.
+        self.output_scale_var = tk.StringVar(value="1× (off)")
+        ctk.CTkLabel(row, text="Scale:", anchor="w"
+                     ).grid(row=1, column=4, padx=(20, 4), pady=(4, 0))
+        scale_menu = ctk.CTkOptionMenu(
+            row, variable=self.output_scale_var,
+            values=list(pipeline.OUTPUT_SCALE_LABELS), width=130,
+            command=lambda _v: self._update_scale_state())
+        scale_menu.grid(row=1, column=5, pady=(4, 0))
+        _Tooltip(scale_menu,
+                 "Resize every output by a power of two, as the very last step "
+                 "before saving. Pixel-exact: no interpolation, every output "
+                 "pixel is a copy of a source pixel, so pixel edges, the palette "
+                 "of an indexed PNG and PS1 0/127/255 alpha all survive.\n\n"
+                 "  2× / 4× / 8× — each pixel becomes a 2×2 / 4×4 / 8×8 block.\n"
+                 "  1/2× / 1/4× / 1/8× — each 2×2 / 4×4 / 8×8 block (grid from "
+                 "the top-left) becomes one pixel, chosen by Downscale.\n\n"
+                 "A size that doesn't divide evenly rounds up; the edge pixels "
+                 "fill out the last block, so nothing is cropped.")
+        ctk.CTkLabel(row, text="Downscale:", anchor="w"
+                     ).grid(row=2, column=4, padx=(20, 4), pady=(4, 0))
+        self.output_scale_down_var = tk.StringVar(value="Majority vote")
+        self._scale_down_menu = ctk.CTkOptionMenu(
+            row, variable=self.output_scale_down_var,
+            values=["Majority vote", "Centre sample"], width=130)
+        self._scale_down_menu.grid(row=2, column=5, pady=(4, 0))
+        _Tooltip(self._scale_down_menu,
+                 "How a downscale picks each block's pixel (1/2× and smaller):\n"
+                 "  Majority vote — the block's dominant colour, using the Vote "
+                 "tolerance from the Tune tab's Pixelate section. Best for "
+                 "upscaled or noisy art.\n"
+                 "  Centre sample — the pixel at the block centre.\n\n"
+                 "On already-pixelated art whose blocks match the scale, both "
+                 "give the same result.")
+        self._update_scale_state()
 
         # Preset description row
         desc_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -5023,6 +5109,10 @@ class BatchTab(ctk.CTkFrame):
                             self._cm_method_menu, self._cm_space_menu,
                             self._cm_strength_slider]
         self._update_cm_state()
+
+    def _update_scale_state(self):
+        scale = dict(pipeline.OUTPUT_SCALES).get(self.output_scale_var.get(), 1.0)
+        self._scale_down_menu.configure(state="normal" if scale < 1 else "disabled")
 
     def _update_cm_state(self):
         state = "normal" if self.cm_enabled_var.get() else "disabled"
@@ -5260,6 +5350,16 @@ class BatchTab(ctk.CTkFrame):
             params_snapshot.pop("_manual_edits", None)
             params_snapshot.pop("_manual_edits_fit", None)
 
+        # Output scale: batch-wide, applied to each finished image before save.
+        scale_label = self.output_scale_var.get()
+        scale = dict(pipeline.OUTPUT_SCALES).get(scale_label, 1.0)
+        params_snapshot["output_scale"] = scale
+        params_snapshot["output_scale_down"] = self.output_scale_down_var.get()
+        if scale != 1.0:
+            down = (f", downscale by {self.output_scale_down_var.get().lower()}"
+                    if scale < 1 else "")
+            self._log(f"Output scale: {scale_label}{down}")
+
         autopick = bool(self.autopick_var.get())
         self._stop_flag.clear()
         self.run_btn.configure(state="disabled")
@@ -5341,6 +5441,13 @@ class BatchTab(ctk.CTkFrame):
                 if dst.suffix.lower() == ".dds":
                     dds_comp = "dxt1" if fmt == "DDS DXT1" else "dxt5"
                     file_params = {**file_params, "dds_compression": dds_comp}
+
+                # Output scale is batch-wide too (auto-pick presets lack it).
+                file_params = {
+                    **file_params,
+                    "output_scale": params.get("output_scale", 1.0),
+                    "output_scale_down": params.get("output_scale_down", "Majority vote"),
+                }
 
                 tasks.append({
                     "src": str(src), "dst": str(dst), "params": file_params,
