@@ -25,7 +25,7 @@ It has a live **Tune** tab (single image, side‑by‑side before/after with zoo
 - **Save edits… / Load edits…** persist the edit layer to a `*.edits.npz` sidecar and re‑apply it to another image (same‑size verbatim, different‑size placed at the same x,y and clipped). A matching sidecar auto‑loads with its image. (See [MANUAL_EDITS.md](MANUAL_EDITS.md) for the architecture.)
 
 **Finishing**
-- **Pixelate** (fractional factors) and **soften edges** (alpha‑outline blur, RGB only), with an optional **dither** on top of the blur — a zero‑mean speckle confined to the same softened band, to break up the smooth gradient.
+- **Pixelate** (fractional factors), with each block coloured by its **centre pixel** or by **majority vote** (the block's dominant colour — robust to upscaler noise, never invents colours or alpha values), and **soften edges** (alpha‑outline blur, RGB only), with an optional **dither** on top of the blur — a zero‑mean speckle confined to the same softened band, to break up the smooth gradient.
 - Output **colour depth / palette**: reduce via libimagequant, with **dithering** (rendered at pixel‑art block resolution) and **custom‑palette matching** to any reference image. **Protect vivid colours** reserves palette slots for small saturated accents (e.g. red eyes on a grey body) so they survive aggressive reduction instead of merging into the dominant range. Reducing colour depth **preserves the transparent base colour** (black / white / whatever it is) instead of leaving an arbitrary fringe.
 - A 5‑slot **post‑processing effects chain**: unsharp, bilateral smooth, saturation boost, emboss, chrome, bevel, Dave Hill, texturize, watercolor, screen effects (mesh / displace), colour tint, film grain, frosted glass, lomo, oil paint, granulate, turbulence, normal map, CRT scanlines.
 
@@ -36,7 +36,7 @@ It has a live **Tune** tab (single image, side‑by‑side before/after with zoo
 - A **tile‑seam grid** overlay (size / colour / line width / semi‑transparent) that lands on true **source‑pixel** boundaries and stays put through zoom, pan and the full‑res detail overlay — for spotting upscale tile seams.
 
 **Batch**
-- Parallel processing, presets (with per‑file auto‑pick), skip/overwrite handling, **colour‑match to a reference frame** (Reinhard or histogram, in LAB/RGB) to kill colour flicker across animation frames, and an optional **Include manual edits** (applies the Tune tab's painted layer to every file at fixed x,y).
+- Parallel processing, presets (with per‑file auto‑pick), skip/overwrite handling, **colour‑match to a reference frame** (Reinhard or histogram, in LAB/RGB) to kill colour flicker across animation frames, an optional **Include manual edits** (applies the Tune tab's painted layer to every file at fixed x,y), and a pixel‑exact **output scale** (1/8× to 8×, powers of two; no interpolation — downscales pick each block's pixel by majority vote or centre sample, so palettes and PS1 alpha survive).
 
 **Export:** PNG (true indexed PNG with transparency), TIFF, WebP, DDS (DXT1 / DXT5).
 
