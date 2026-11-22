@@ -863,6 +863,7 @@ def _gauss_zero(f: np.ndarray, sigma: float) -> np.ndarray:
     k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
     k = (k / k.sum()).astype(np.float32)
     out = f
+    tmp = np.empty_like(f)                # reused per tap: no per-tap allocation
     for axis in (1, 0):
         src, acc = out, np.zeros_like(out)
         n = src.shape[axis]
@@ -873,9 +874,13 @@ def _gauss_zero(f: np.ndarray, sigma: float) -> np.ndarray:
             else:
                 dst_sl, src_sl = slice(0, n - s), slice(s, n)
             if axis == 1:
-                acc[:, dst_sl] += wgt * src[:, src_sl]
+                t = tmp[:, dst_sl]
+                np.multiply(src[:, src_sl], wgt, out=t)
+                acc[:, dst_sl] += t
             else:
-                acc[dst_sl] += wgt * src[src_sl]
+                t = tmp[dst_sl]
+                np.multiply(src[src_sl], wgt, out=t)
+                acc[dst_sl] += t
         out = acc
     return out
 
@@ -887,30 +892,59 @@ def _masked_gauss(f: np.ndarray, weight: np.ndarray, sigma: float) -> np.ndarray
 
 def _edt(mask: np.ndarray) -> np.ndarray:
     """Exact Euclidean distance from each True pixel to the nearest False
-    pixel (0 on False pixels; pixel-centre distances). Rows first (nearest
-    background in the row), then columns: d² = min over k of row_d²[y±k] + k²,
-    searching k outward only while k² can still beat the best so far."""
+    pixel (0 on False pixels; pixel-centre distances), in linear time.
+
+    Rows first: the squared distance to the nearest background pixel in the
+    same row. Then columns: d²(y) = min over y' of row_d²(y') + (y - y')², the
+    lower envelope of parabolas (Felzenszwalb & Huttenlocher), run for every
+    column at once — one numpy step per row, so the cost no longer grows with
+    how far the interior is from the edge."""
     h, w = mask.shape
     idx = np.arange(w, dtype=np.float64)
     bg = ~mask
     left = np.maximum.accumulate(np.where(bg, idx, -np.inf), axis=1)
     right = np.minimum.accumulate(np.where(bg, idx, np.inf)[:, ::-1], axis=1)[:, ::-1]
-    g2 = np.minimum(idx - left, right - idx) ** 2
-    best = g2.ravel().copy()
-    act = np.flatnonzero(best > 1.0)
-    ys, xs = np.divmod(act, w)
-    k = 1
-    while act.size:
-        cand = np.full(act.size, np.inf)
-        up = ys >= k
-        cand[up] = g2[ys[up] - k, xs[up]]
-        dn = ys + k < h
-        cand[dn] = np.minimum(cand[dn], g2[ys[dn] + k, xs[dn]])
-        best[act] = np.minimum(best[act], cand + k * k)
-        k += 1
-        keep = best[act] > k * k
-        act, ys, xs = act[keep], ys[keep], xs[keep]
-    return np.sqrt(best).reshape(h, w)
+    f = np.minimum(idx - left, right - idx) ** 2      # inf where a row has no background
+
+    lanes = np.arange(w)
+    v = np.zeros((h, w), np.int64)                    # parabola sites (rows), per column
+    z = np.full((h + 1, w), np.inf)                   # where each parabola starts winning
+    k = np.full(w, -1, np.int64)                      # top of each column's stack
+    for q in range(h):
+        fq = f[q]
+        idx_q = np.flatnonzero(np.isfinite(fq))
+        if idx_q.size == 0:
+            continue
+        s = np.full(idx_q.size, -np.inf)              # stays -inf if the stack empties
+        live, pos = idx_q, np.arange(idx_q.size)
+        while live.size:
+            kt = k[live]
+            keep = kt >= 0
+            live, pos, kt = live[keep], pos[keep], kt[keep]
+            if not live.size:
+                break
+            vt = v[kt, live]
+            st = ((fq[live] + q * q) - (f[vt, live] + vt * vt)) / (2.0 * (q - vt))
+            pop = st <= z[kt, live]
+            s[pos[~pop]] = st[~pop]
+            k[live[pop]] -= 1
+            live, pos = live[pop], pos[pop]
+        k[idx_q] += 1
+        v[k[idx_q], idx_q] = q
+        z[k[idx_q], idx_q] = s
+        z[k[idx_q] + 1, idx_q] = np.inf
+
+    d2 = np.empty((h, w))
+    k = np.zeros(w, np.int64)
+    for q in range(h):
+        while True:
+            adv = z[k + 1, lanes] < q
+            if not adv.any():
+                break
+            k[adv] += 1
+        vk = v[k, lanes]
+        d2[q] = (q - vk) ** 2 + f[vk, lanes]
+    return np.sqrt(d2)
 
 
 def _islands(mask: np.ndarray):

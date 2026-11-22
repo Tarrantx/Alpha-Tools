@@ -51,6 +51,21 @@ def test_edt_exact_vs_brute_force():
                 assert abs(d[y, x] - ref) < 1e-6, (h, w, y, x, d[y, x], ref)
 
 
+def test_edt_fast_on_one_big_island():
+    """One 1600x1600 blob (interior ~640 px from the edge) — the case that used
+    to take a minute. Linear-time now; spot-checked against brute force."""
+    import time
+    yy, xx = np.mgrid[0:1600, 0:1600]
+    m = (xx - 800) ** 2 + (yy - 800) ** 2 < 640 ** 2
+    t0 = time.perf_counter()
+    d = pf._edt(m)
+    assert time.perf_counter() - t0 < 8.0
+    bg = np.argwhere(~m)
+    for y, x in ((800, 800), (500, 900), (170, 800), (800, 1430)):
+        ref = np.sqrt(((bg - (y, x)) ** 2).sum(1)).min()
+        assert abs(d[y, x] - ref) < 1e-6, (y, x, d[y, x], ref)
+
+
 def _flood_labels(m):
     """Brute-force 8-connected labelling (reference)."""
     h, w = m.shape
