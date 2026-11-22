@@ -36,7 +36,7 @@ It has a live **Tune** tab (single image, side‑by‑side before/after with zoo
 - A **tile‑seam grid** overlay (size / colour / line width / semi‑transparent) that lands on true **source‑pixel** boundaries and stays put through zoom, pan and the full‑res detail overlay — for spotting upscale tile seams.
 
 **Batch**
-- Parallel processing, presets (with per‑file auto‑pick), skip/overwrite handling, **colour‑match to a reference frame** (Reinhard or histogram, in LAB/RGB) to kill colour flicker across animation frames, an optional **Include manual edits** (applies the Tune tab's painted layer to every file at fixed x,y), and a pixel‑exact **output scale** (1/8× to 8×, powers of two; no interpolation — downscales pick each block's pixel by majority vote or centre sample, so palettes and PS1 alpha survive).
+- Parallel processing, presets (with per‑file auto‑pick), skip/overwrite handling, **colour‑match to a reference frame** (Reinhard or histogram, in LAB/RGB) to kill colour flicker across animation frames, an optional **Include manual edits** (applies the Tune tab's painted layer to every file at fixed x,y), and a pixel‑exact **output scale** (1/8× to 8×, powers of two; no interpolation — downscales pick each block's pixel by majority vote or centre sample, so palettes and PS1 alpha survive). The same **Save scale** / **Downscale** options are on the Tune tab for single‑image saves.
 
 **Export:** PNG (true indexed PNG with transparency), TIFF, WebP, DDS (DXT1 / DXT5).
 

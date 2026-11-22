@@ -52,6 +52,27 @@ SUPPORTED_INPUTS = (
 )
 OUTPUT_FORMATS = ["Same as input", "PNG", "TIFF", "WebP", "DDS DXT1", "DDS DXT5"]
 
+# Output scale controls (Batch tab + Tune "Save image"). Choices come from
+# pipeline.OUTPUT_SCALES; Downscale only applies below 1×.
+SCALE_DOWN_CHOICES = ["Majority vote", "Centre sample"]
+SCALE_TOOLTIP = (
+    "Resize the saved image by a power of two, as the very last step before "
+    "saving. Pixel-exact: no interpolation, every output pixel is a copy of a "
+    "source pixel, so pixel edges, the palette of an indexed PNG and PS1 "
+    "0/127/255 alpha all survive.\n\n"
+    "  2× / 4× / 8× — each pixel becomes a 2×2 / 4×4 / 8×8 block.\n"
+    "  1/2× / 1/4× / 1/8× — each 2×2 / 4×4 / 8×8 block (grid from the "
+    "top-left) becomes one pixel, chosen by Downscale.\n\n"
+    "A size that doesn't divide evenly rounds up; the edge pixels fill out the "
+    "last block, so nothing is cropped.")
+DOWNSCALE_TOOLTIP = (
+    "How a downscale picks each block's pixel (1/2× and smaller):\n"
+    "  Majority vote — the block's dominant colour, using the Vote tolerance "
+    "from the Tune tab's Pixelate section. Best for upscaled or noisy art.\n"
+    "  Centre sample — the pixel at the block centre.\n\n"
+    "On already-pixelated art whose blocks match the scale, both give the same "
+    "result.")
+
 
 # --- Per-control help text -------------------------------------------------
 
@@ -4209,7 +4230,7 @@ class TuneTab(ctk.CTkFrame):
         # Centre column: preview area (toolbars, side-by-side panes, status)
         left = ctk.CTkFrame(self)
         left.grid(row=0, column=1, sticky="nsew", padx=4, pady=8)
-        left.rowconfigure(3, weight=1)  # preview row expands
+        left.rowconfigure(4, weight=1)  # preview row expands
         left.columnconfigure(0, weight=1)
 
         # Toolbar (row 1: image + settings buttons)
@@ -4304,9 +4325,30 @@ class TuneTab(ctk.CTkFrame):
             command=self._apply_grid_to_panes,
         ).pack(side="left", padx=(16, 0))
 
+        # Toolbar (row 4: Save image options — pixel-exact power-of-two scale,
+        # applied only to the saved file, like the Batch tab's Scale).
+        save_row = ctk.CTkFrame(left, fg_color="transparent")
+        save_row.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        ctk.CTkLabel(save_row, text="Save scale:", anchor="w").pack(side="left")
+        self._save_scale_var = tk.StringVar(value="1× (off)")
+        save_scale_menu = ctk.CTkOptionMenu(
+            save_row, variable=self._save_scale_var,
+            values=list(pipeline.OUTPUT_SCALE_LABELS), width=100,
+            command=lambda _v: self._update_save_scale_state())
+        save_scale_menu.pack(side="left", padx=(4, 12))
+        _Tooltip(save_scale_menu, SCALE_TOOLTIP)
+        ctk.CTkLabel(save_row, text="Downscale:", anchor="w").pack(side="left")
+        self._save_scale_down_var = tk.StringVar(value=SCALE_DOWN_CHOICES[0])
+        self._save_scale_down_menu = ctk.CTkOptionMenu(
+            save_row, variable=self._save_scale_down_var,
+            values=list(SCALE_DOWN_CHOICES), width=130)
+        self._save_scale_down_menu.pack(side="left", padx=(4, 0))
+        _Tooltip(self._save_scale_down_menu, DOWNSCALE_TOOLTIP)
+        self._update_save_scale_state()
+
         # Preview row
         preview_row = ctk.CTkFrame(left, fg_color="transparent")
-        preview_row.grid(row=3, column=0, sticky="nsew")
+        preview_row.grid(row=4, column=0, sticky="nsew")
         preview_row.columnconfigure(0, weight=1)
         preview_row.columnconfigure(1, weight=1)
         preview_row.rowconfigure(1, weight=1)
@@ -4354,7 +4396,7 @@ class TuneTab(ctk.CTkFrame):
         # Status line
         self.status_label = ctk.CTkLabel(left, text="", anchor="w",
                                          font=ctk.CTkFont(size=11))
-        self.status_label.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        self.status_label.grid(row=5, column=0, sticky="ew", pady=(4, 0))
 
         # Right column: manual-edits panel (top) + image-modifying controls.
         right = ctk.CTkFrame(self, fg_color="transparent")
@@ -4441,15 +4483,29 @@ class TuneTab(ctk.CTkFrame):
                     "No  → DXT1 — BC1, RGB, no/1-bit alpha, smaller file.",
                 )
                 save_params["dds_compression"] = "dxt5" if use_dxt5 else "dxt1"
+            scale_label = self._save_scale_var.get()
+            save_params["output_scale"] = dict(pipeline.OUTPUT_SCALES).get(scale_label, 1.0)
+            save_params["output_scale_down"] = self._save_scale_down_var.get()
             import tempfile
             with tempfile.TemporaryDirectory(prefix="alphasave_") as tmp:
                 tmp = Path(tmp)
                 in_path = tmp / "src.png"
                 self.source_image.save(in_path, compress_level=1)
                 pipeline.process_image(in_path, path, save_params, work_dir=tmp)
-            self.status_label.configure(text=f"Saved {path}")
+            note = ""
+            if save_params["output_scale"] != 1.0:
+                try:
+                    with Image.open(path) as saved:
+                        note = f" — scaled {scale_label} to {saved.width}×{saved.height}px"
+                except Exception:
+                    note = f" — scaled {scale_label}"
+            self.status_label.configure(text=f"Saved {path}{note}")
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
+
+    def _update_save_scale_state(self):
+        scale = dict(pipeline.OUTPUT_SCALES).get(self._save_scale_var.get(), 1.0)
+        self._save_scale_down_menu.configure(state="normal" if scale < 1 else "disabled")
 
     def _save_preset(self):
         path = filedialog.asksaveasfilename(
@@ -5067,31 +5123,15 @@ class BatchTab(ctk.CTkFrame):
             values=list(pipeline.OUTPUT_SCALE_LABELS), width=130,
             command=lambda _v: self._update_scale_state())
         scale_menu.grid(row=1, column=5, pady=(4, 0))
-        _Tooltip(scale_menu,
-                 "Resize every output by a power of two, as the very last step "
-                 "before saving. Pixel-exact: no interpolation, every output "
-                 "pixel is a copy of a source pixel, so pixel edges, the palette "
-                 "of an indexed PNG and PS1 0/127/255 alpha all survive.\n\n"
-                 "  2× / 4× / 8× — each pixel becomes a 2×2 / 4×4 / 8×8 block.\n"
-                 "  1/2× / 1/4× / 1/8× — each 2×2 / 4×4 / 8×8 block (grid from "
-                 "the top-left) becomes one pixel, chosen by Downscale.\n\n"
-                 "A size that doesn't divide evenly rounds up; the edge pixels "
-                 "fill out the last block, so nothing is cropped.")
+        _Tooltip(scale_menu, SCALE_TOOLTIP)
         ctk.CTkLabel(row, text="Downscale:", anchor="w"
                      ).grid(row=2, column=4, padx=(20, 4), pady=(4, 0))
-        self.output_scale_down_var = tk.StringVar(value="Majority vote")
+        self.output_scale_down_var = tk.StringVar(value=SCALE_DOWN_CHOICES[0])
         self._scale_down_menu = ctk.CTkOptionMenu(
             row, variable=self.output_scale_down_var,
-            values=["Majority vote", "Centre sample"], width=130)
+            values=list(SCALE_DOWN_CHOICES), width=130)
         self._scale_down_menu.grid(row=2, column=5, pady=(4, 0))
-        _Tooltip(self._scale_down_menu,
-                 "How a downscale picks each block's pixel (1/2× and smaller):\n"
-                 "  Majority vote — the block's dominant colour, using the Vote "
-                 "tolerance from the Tune tab's Pixelate section. Best for "
-                 "upscaled or noisy art.\n"
-                 "  Centre sample — the pixel at the block centre.\n\n"
-                 "On already-pixelated art whose blocks match the scale, both "
-                 "give the same result.")
+        _Tooltip(self._scale_down_menu, DOWNSCALE_TOOLTIP)
         self._update_scale_state()
 
         # Preset description row

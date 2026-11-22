@@ -124,6 +124,62 @@ def test_process_image_applies_scale():
             assert len(im.convert("RGBA").getcolors(256)) <= 16
 
 
+def test_tune_save_image_scale():
+    """Tune tab "Save image": the Save scale / Downscale row reaches the saved
+    file, and Downscale is only enabled below 1×. Drives the real handler with
+    the file dialog stubbed (and the remembered-folder setting left alone).
+    Skipped if no display."""
+    try:
+        import main
+        app = main.AlphaToolsApp()
+        app.withdraw(); app.update_idletasks()
+    except Exception as e:
+        print("SKIP tune save (no GUI):", e)
+        return
+    saved = {}
+    orig = (main.filedialog.asksaveasfilename, main.save_dialog_dir,
+            main.load_dialog_dir, main.messagebox.showerror)
+    main.save_dialog_dir = lambda *a, **k: None
+    main.load_dialog_dir = lambda *a, **k: ""
+
+    def _err(title, msg):
+        raise AssertionError(f"{title}: {msg}")
+    main.messagebox.showerror = _err
+    try:
+        t = app.tune
+        src = Image.fromarray(_rand_rgba(40, 56, seed=6), "RGBA")
+        t.source_image, t.source_path, t.last_after = src, "synthetic.png", src
+        assert str(t._save_scale_down_menu.cget("state")) == "disabled"   # 1× (off)
+        with tempfile.TemporaryDirectory(prefix="atune_") as d:
+            d = Path(d)
+            for label, mode, size in (("1/4×", CENTRE, (14, 10)), ("1/2×", VOTE, (28, 20)),
+                                      ("2×", VOTE, (112, 80)), ("1× (off)", VOTE, (56, 40))):
+                out = d / f"out_{len(saved)}.png"
+                main.filedialog.asksaveasfilename = lambda **k: str(out)
+                t._save_scale_var.set(label)
+                t._update_save_scale_state()
+                state = str(t._save_scale_down_menu.cget("state"))
+                assert state == ("normal" if label.startswith("1/") else "disabled"), label
+                t._save_scale_down_var.set(mode)
+                t._save_image()
+                with Image.open(out) as im:
+                    got = np.asarray(im.convert("RGBA"))
+                assert got.shape[1::-1] == size, (label, got.shape)
+                # Same pixels as the pipeline's own save at that scale.
+                ref = d / "ref.png"
+                src.save(d / "src.png")
+                ap.process_image(d / "src.png", ref, {**t.params, "output_scale":
+                                 dict(ap.OUTPUT_SCALES)[label], "output_scale_down": mode})
+                with Image.open(ref) as im:
+                    assert np.array_equal(got, np.asarray(im.convert("RGBA"))), label
+                saved[label] = size
+        assert "scaled" not in t.status_label.cget("text")              # last save was 1×
+    finally:
+        (main.filedialog.asksaveasfilename, main.save_dialog_dir,
+         main.load_dialog_dir, main.messagebox.showerror) = orig
+        app.destroy()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
