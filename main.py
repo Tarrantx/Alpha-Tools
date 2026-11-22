@@ -4427,6 +4427,9 @@ class TuneTab(ctk.CTkFrame):
         save_dialog_dir("load_image", path)
         try:
             img = pipeline.load_rgba(path)
+        except pipeline.ImageTooLargeError as e:
+            messagebox.showerror("Image too large", str(e))
+            return
         except Exception as e:
             messagebox.showerror("Load failed", f"Couldn't open image:\n{e}")
             return
@@ -5621,6 +5624,12 @@ class BatchTab(ctk.CTkFrame):
                 runnable.append(tk)
 
         workers = self._worker_count(len(runnable))
+        if workers > 1:
+            # Each worker holds a whole image; don't start more than fit in RAM.
+            workers, ram_note = pipeline.batch_worker_cap(
+                [tk["src"] for tk in runnable], workers)
+            if ram_note:
+                self._log(ram_note)
         if workers <= 1 or len(runnable) <= 1:
             # Sequential — avoids process-spawn overhead for tiny batches.
             for tk in runnable:

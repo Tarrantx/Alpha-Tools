@@ -13,10 +13,12 @@ pre-stage. ImageMagick stays bundled but is not on the hot path today.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Optional
@@ -38,6 +40,103 @@ except ImportError:
 
 # Suppress the console-window flash when launching helpers from the GUI build.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+# --- Image size limit from installed RAM -----------------------------------
+#
+# Pillow refuses images over 2 x Image.MAX_IMAGE_PIXELS (178,956,970 px by
+# default) as a "decompression bomb" guard. For the user's own textures the
+# real limit is RAM: processing peaks at ~65 bytes per pixel (measured with
+# preset 07 + majority-vote pixelate + the Sprite normal map). So the limit is
+# set from the installed RAM, never below Pillow's default. Batch worker
+# processes import this module, so they get the same limit.
+
+BYTES_PER_PIXEL = 70                 # measured ~65 B/px peak + the loaded image
+RAM_FRACTION = 0.6                   # share of installed RAM one image may plan on
+WORKER_OVERHEAD = 300 * 2**20        # per batch process: Python + numpy + Pillow
+_PILLOW_PIXEL_LIMIT = 2 * 89_478_485  # Pillow's own error threshold
+
+
+def memory_status() -> "Optional[tuple[int, int]]":
+    """(total, available) physical RAM in bytes, or None if unknown."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong)] + [
+                    (n, ctypes.c_ulonglong) for n in (
+                        "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile", "ullAvailPageFile",
+                        "ullTotalVirtual", "ullAvailVirtual", "ullAvailExtendedVirtual")]
+
+            st = _MemStatus()
+            st.dwLength = ctypes.sizeof(_MemStatus)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return None
+            return int(st.ullTotalPhys), int(st.ullAvailPhys)
+        page = os.sysconf("SC_PAGE_SIZE")
+        return page * os.sysconf("SC_PHYS_PAGES"), page * os.sysconf("SC_AVPHYS_PAGES")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def image_pixel_limit(total_ram: "Optional[int]") -> int:
+    """Largest image (pixels) to open: RAM_FRACTION of the RAM at
+    BYTES_PER_PIXEL, never below Pillow's default limit."""
+    return max(_PILLOW_PIXEL_LIMIT, int((total_ram or 0) * RAM_FRACTION / BYTES_PER_PIXEL))
+
+
+_RAM = memory_status()
+IMAGE_PIXEL_LIMIT = image_pixel_limit(_RAM[0] if _RAM else None)
+# Pillow raises above 2 x MAX_IMAGE_PIXELS; its warning band below that means
+# nothing once the limit is ours, so the warning is silenced.
+Image.MAX_IMAGE_PIXELS = (IMAGE_PIXEL_LIMIT + 1) // 2
+warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
+
+
+class ImageTooLargeError(ValueError):
+    """An image over IMAGE_PIXEL_LIMIT (set from the installed RAM)."""
+
+
+def open_image(path) -> Image.Image:
+    """Image.open, with a plain-English error for an image over the
+    RAM-based size limit instead of Pillow's "decompression bomb" text."""
+    try:
+        return Image.open(path)
+    except Image.DecompressionBombError as e:
+        m = re.search(r"\((\d+) pixels\)", str(e))
+        size = f"{int(m.group(1)) / 1e6:,.0f} megapixels" if m else "too large"
+        ram = (f"{_RAM[0] / 2**30:.0f} GB of RAM" if _RAM
+               else "RAM couldn't be detected, so Pillow's default applies")
+        raise ImageTooLargeError(
+            f"{Path(path).name} is {size}. The limit on this PC is "
+            f"{IMAGE_PIXEL_LIMIT / 1e6:,.0f} megapixels ({ram}; processing needs "
+            f"about {BYTES_PER_PIXEL} bytes of RAM per pixel).") from None
+
+
+def batch_worker_cap(paths, workers: int) -> "tuple[int, str]":
+    """Cap a batch's parallel workers to what fits in the RAM free right now:
+    each worker may hold the batch's largest image at BYTES_PER_PIXEL, plus
+    WORKER_OVERHEAD. Reads image headers only. Returns (workers, note), the
+    note explaining a RAM cap (empty when RAM isn't the limit)."""
+    status = memory_status()
+    if workers <= 1 or status is None:
+        return workers, ""
+    largest = 0
+    for p in paths:
+        try:
+            with Image.open(p) as im:
+                largest = max(largest, im.width * im.height)
+        except Exception:
+            continue        # unreadable / over the limit: that file fails on its own
+    if largest == 0:
+        return workers, ""
+    fit = max(1, int(status[1] * 0.8 // (largest * BYTES_PER_PIXEL + WORKER_OVERHEAD)))
+    if fit >= workers:
+        return workers, ""
+    return fit, (f"Parallel workers limited to {fit} by free RAM "
+                 f"({status[1] / 2**30:.1f} GB free; largest image "
+                 f"{largest / 1e6:,.0f} megapixels).")
 
 
 def quantize_image(img: Image.Image, colors: int) -> Image.Image:
@@ -992,8 +1091,9 @@ def _build_fx_chain(params: dict) -> list:
 
 def load_rgba(path) -> Image.Image:
     """Load any supported image as RGBA. Adds a fully-opaque alpha if the
-    source had none, so downstream code can assume an alpha channel exists."""
-    img = Image.open(path)
+    source had none, so downstream code can assume an alpha channel exists.
+    Raises ImageTooLargeError over IMAGE_PIXEL_LIMIT."""
+    img = open_image(path)
     if img.mode != "RGBA":
         img = img.convert("RGBA")
     return img
@@ -1040,7 +1140,7 @@ def classify_for_preset(path) -> tuple[str, str]:
         return (PRESET_BINARY_CUTOUT, "DuckStation paletted — no semi (binary)")
 
     # 2. Histogram fallback (Beetle / unknown sources).
-    img = Image.open(path)
+    img = open_image(path)
     if "A" not in img.getbands():
         return (PRESET_DEFAULT, "no alpha channel")
 

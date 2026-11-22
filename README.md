@@ -40,6 +40,8 @@ It has a live **Tune** tab (single image, side‑by‑side before/after with zoo
 
 **Export:** PNG (true indexed PNG with transparency), TIFF, WebP, DDS (DXT1 / DXT5).
 
+**Large images:** the largest image Alpha Tools will open is set from the installed RAM (60% of RAM at ~70 bytes per pixel — e.g. ~589 megapixels with 64 GB — never below Pillow's default of 179 MP), with a plain "Image too large" message above it. Batch also limits how many images it processes in parallel to what fits in the RAM free at the start.
+
 ## Running from source
 
 ```bash
